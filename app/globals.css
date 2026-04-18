@@ -1,0 +1,170 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fafaf9;
+  --foreground: #111110;
+  --card: #ffffff;
+  --card-foreground: #111110;
+  --popover: #ffffff;
+  --popover-foreground: #111110;
+  --primary: #111110;
+  --primary-foreground: #ffffff;
+  --secondary: #f3f0ea;
+  --secondary-foreground: #111110;
+  --muted: #f5f2ed;
+  --muted-foreground: #6b6966;
+  --accent: #6366f1;
+  --accent-soft: #eef2ff;
+  --ui-accent: #f3f0ea;
+  --accent-foreground: #111110;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --surface: #ffffff;
+  --surface-soft: #fbfaf8;
+  --border: #e8e5e0;
+  --input: #d6d3cf;
+  --ring: #6366f1;
+  --text-secondary: #6b6966;
+  --text-muted: #a8a5a0;
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--ui-accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius: 0.75rem;
+  --font-sans: "Segoe UI";
+  --font-mono: "Consolas";
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: var(--background);
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(99, 102, 241, 0.1), transparent 28%),
+    radial-gradient(circle at top right, rgba(14, 165, 233, 0.08), transparent 22%),
+    linear-gradient(180deg, #fcfbf8 0%, #f7f5f2 100%);
+  color: var(--foreground);
+  font-family: "Segoe UI", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+::selection {
+  background: rgba(99, 102, 241, 0.16);
+}
+
+.shell-card {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 1px 1px rgba(17, 17, 16, 0.02), 0 18px 50px rgba(17, 17, 16, 0.04);
+  backdrop-filter: blur(12px);
+}
+
+.shell-panel {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 1px 1px rgba(17, 17, 16, 0.03), 0 20px 60px rgba(17, 17, 16, 0.04);
+}
+
+.shell-grid {
+  background-image:
+    linear-gradient(rgba(232, 229, 224, 0.35) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(232, 229, 224, 0.35) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.soft-shadow {
+  box-shadow: 0 10px 30px rgba(17, 17, 16, 0.08);
+}
+
+.panel-enter {
+  animation: panel-in 180ms ease-out;
+}
+
+.cursor {
+  animation: blink 800ms step-end infinite;
+}
+
+.ticker-sweep {
+  background-size: 200% 100%;
+  animation: sweep 3s linear infinite;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(90deg, #f4f1ec 0%, #ece8e2 50%, #f4f1ec 100%);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes sweep {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
