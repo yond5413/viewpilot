@@ -9,10 +9,10 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 const variantClasses: Record<BadgeVariant, string> = {
-  default: "border-transparent bg-[var(--foreground)] text-white",
+  default: "border-transparent bg-[var(--accent)] text-white",
   secondary: "border-transparent bg-[var(--accent-soft)] text-[var(--accent)]",
   destructive: "border-transparent bg-[var(--danger)] text-white",
-  outline: "border-[var(--border)] bg-white text-[var(--foreground)]",
+  outline: "border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]",
 };
 
 function Badge({ className, variant = "default", ...props }: BadgeProps) {

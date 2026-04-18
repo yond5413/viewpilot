@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import type { CSSProperties, ComponentType } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   ChevronRight,
@@ -11,18 +11,18 @@ import {
   LoaderCircle,
   Mic,
   MoreHorizontal,
-  PanelLeft,
   SendHorizonal,
   Sparkles,
+  TrendingUp,
+  TrendingDown,
+  Minus,
 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 import type { DashboardPanel, DashboardState } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
   CardDescription,
-  CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import {
@@ -33,8 +33,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "./cn";
 import { fetchDashboardState } from "./dashboard-data";
 
@@ -46,9 +44,7 @@ type PlotProps = {
   style?: CSSProperties;
 };
 
-const Plot = dynamic(() => import("react-plotly.js"), {
-  ssr: false,
-}) as ComponentType<PlotProps>;
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as ComponentType<PlotProps>;
 
 type DashboardShellProps = {
   sessionId: string;
@@ -64,17 +60,49 @@ type BrowserSpeechRecognition = {
   start: () => void;
 };
 
-type SpeechRecognitionResultLike = {
-  transcript?: string;
-};
-
+type SpeechRecognitionResultLike = { transcript?: string };
 type SpeechRecognitionEventLike = {
   results: ArrayLike<ArrayLike<SpeechRecognitionResultLike>>;
 };
-
 type SpeechRecognitionWithWebkit = typeof window & {
   SpeechRecognition?: new () => BrowserSpeechRecognition;
   webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
+};
+
+const stagger = {
+  container: {
+    hidden: { opacity: 0 },
+    show: {
+      opacity: 1,
+      transition: { staggerChildren: 0.07, delayChildren: 0.05 },
+    },
+  },
+  item: {
+    hidden: { opacity: 0, y: 12 },
+    show: {
+      opacity: 1,
+      y: 0,
+      transition: { type: "spring" as const, stiffness: 280, damping: 28 },
+    },
+  },
+};
+
+const EMPTY_CELL = "—";
+
+const formatDisplayValue = (value: unknown) => {
+  if (value == null) {
+    return EMPTY_CELL;
+  }
+
+  if (typeof value === "number") {
+    return new Intl.NumberFormat("en-US", {
+      notation: Math.abs(value) >= 1000 ? "compact" : "standard",
+      maximumFractionDigits: Math.abs(value) >= 1000 ? 2 : 1,
+    }).format(value);
+  }
+
+  const text = String(value).trim();
+  return text || EMPTY_CELL;
 };
 
 export function DashboardShell({ sessionId }: DashboardShellProps) {
@@ -87,7 +115,6 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
 
   useEffect(() => {
     let active = true;
-
     const syncState = () => {
       fetchDashboardState(sessionId)
         .then((nextState) => {
@@ -108,10 +135,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
     };
 
     syncState();
-    const intervalId = window.setInterval(() => {
-      syncState();
-    }, 20000);
-
+    const intervalId = window.setInterval(syncState, 20000);
     return () => {
       active = false;
       window.clearInterval(intervalId);
@@ -119,7 +143,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
   }, [sessionId]);
 
   const visibleStatus = useMemo(() => {
-    if (loading) return "Preparing dashboard workspace...";
+    if (loading) return "Preparing dashboard…";
     return snapshot?.status || "Ready";
   }, [loading, snapshot?.status]);
 
@@ -131,22 +155,15 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
     try {
       const response = await fetch("/api/query", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          sessionId,
-          prompt: query.trim(),
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, prompt: query.trim() }),
       });
 
       const payload = (await response.json()) as DashboardState | { error?: string };
 
       if (!response.ok || "error" in payload) {
         throw new Error(
-          "error" in payload && payload.error
-            ? payload.error
-            : "The query request failed.",
+          "error" in payload && payload.error ? payload.error : "The query request failed.",
         );
       }
 
@@ -154,9 +171,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
       setQuery("");
     } catch (queryError) {
       setError(
-        queryError instanceof Error
-          ? queryError.message
-          : "Unable to run the copilot query.",
+        queryError instanceof Error ? queryError.message : "Unable to run the copilot query.",
       );
     } finally {
       setSubmitting(false);
@@ -193,9 +208,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
   const handleExport = async () => {
     const response = await fetch("/api/export", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId }),
     });
 
@@ -208,128 +221,208 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
   };
 
   return (
-    <main className="min-h-screen px-4 py-4 sm:px-6 lg:px-8">
-      <div className="mx-auto grid w-full max-w-7xl gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <section className="min-w-0 space-y-6">
-          <header className="shell-card panel-enter rounded-[28px] px-5 py-4 sm:px-6">
+    <main className="noise-overlay relative min-h-screen overflow-hidden px-4 py-4 sm:px-5 lg:px-6">
+      {/* Background blobs */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        {/* Top spotlight */}
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[#6366f1] to-transparent opacity-50" />
+        <div className="absolute left-1/2 -top-32 h-64 w-[50%] -translate-x-1/2 rounded-full bg-[#6366f1] opacity-[0.08] blur-[80px]" />
+        {/* Blobs */}
+        <div className="animate-blob absolute -left-60 -top-60 h-[700px] w-[700px] rounded-full bg-[#6366f1] opacity-[0.10] blur-[120px]" />
+        <div className="animate-blob-delay absolute -right-60 bottom-0 h-[500px] w-[500px] rounded-full bg-[#8b5cf6] opacity-[0.07] blur-[100px]" />
+        <div className="dot-grid absolute inset-0" />
+      </div>
+
+      <div className="relative mx-auto grid w-full max-w-[1400px] gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+        {/* Main column */}
+        <section className="min-w-0 space-y-5">
+          {/* Header */}
+          <motion.header
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, ease: "easeOut" }}
+            className="glass-card rounded-[24px] px-5 py-4 sm:px-6"
+          >
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-                  <Badge variant="outline" className="inline-flex items-center gap-2 rounded-full px-3 py-1 normal-case tracking-normal">
-                    <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" />
-                    Session {sessionId}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className="inline-flex items-center gap-1.5 rounded-full border-[var(--border)] bg-[var(--accent-soft)] px-3 py-1 text-xs text-[var(--accent)]"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    Session {sessionId.slice(0, 8)}…
                   </Badge>
-                  <Badge variant="secondary" className="inline-flex items-center gap-1 rounded-full px-3 py-1 normal-case tracking-normal text-[var(--accent)]">
-                    <CircleDot className="h-3 w-3" />
-                    {snapshot?.filename ?? "Awaiting upload"}
+                  <Badge
+                    variant="outline"
+                    className="inline-flex items-center gap-1.5 rounded-full border-[var(--border)] bg-[var(--card)] px-3 py-1 text-xs text-[var(--text-secondary)]"
+                  >
+                    <CircleDot className="h-3 w-3 text-[var(--success)]" />
+                    {snapshot?.filename ?? "Awaiting source"}
                   </Badge>
                 </div>
                 <h1 className="mt-3 truncate text-2xl font-semibold tracking-tight text-[var(--foreground)] sm:text-3xl">
                   {snapshot?.profile?.filename ?? "Analytics workspace"}
                 </h1>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-secondary)] sm:text-base">
+                <p className="mt-1.5 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">
                   {snapshot?.profile
-                    ? `${snapshot.profile.rows.toLocaleString()} rows, ${snapshot.profile.columns} columns, and ${snapshot.profile.numericColumns.length} numeric fields profiled inside E2B.`
-                    : "Loading the dashboard state for this session."}
+                    ? `${snapshot.profile.rows.toLocaleString()} rows · ${snapshot.profile.columns} columns · ${snapshot.profile.numericColumns.length} numeric fields`
+                    : "Loading dashboard state for this session."}
                 </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button variant="outline" size="lg" className="rounded-full text-sm">
-                  <PanelLeft className="h-4 w-4 text-[var(--accent)]" />
-                  2-column layout
-                </Button>
                 <Button
                   onClick={() => void handleExport()}
                   variant="outline"
-                  size="lg"
-                  className="rounded-full text-sm"
+                  size="sm"
+                  className="rounded-full border-[var(--border-strong)] bg-[var(--card)] text-xs text-[var(--foreground)] hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
                 >
-                  <Download className="h-4 w-4 text-[var(--accent)]" />
+                  <Download className="h-3.5 w-3.5 text-[var(--accent)]" />
                   Export PDF
                 </Button>
               </div>
             </div>
-          </header>
+          </motion.header>
 
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {/* KPI cards */}
+          <motion.section
+            variants={stagger.container}
+            initial="hidden"
+            animate="show"
+            className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
+          >
             {loading
               ? Array.from({ length: 4 }).map((_, index) => <KpiSkeleton key={index} />)
-              : snapshot?.kpis.map((kpi) => <KpiCard key={kpi.id} {...kpi} />)}
-          </section>
+              : snapshot?.kpis.map((kpi) => (
+                  <motion.div key={kpi.id} variants={stagger.item}>
+                    <KpiCard {...kpi} />
+                  </motion.div>
+                ))}
+          </motion.section>
 
-          <section className="shell-panel panel-enter rounded-[28px] p-4 sm:p-5">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          {/* Agent ticker */}
+          <motion.section
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3, duration: 0.4 }}
+            className="glass-card rounded-[20px] px-5 py-4"
+          >
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
               <div>
-                <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-secondary)]">
+                <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-muted)]">
                   Agent ticker
                 </p>
                 <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
                   {loading
-                    ? "Connecting to the session and pulling the latest state."
+                    ? "Connecting to session and pulling latest state."
                     : snapshot?.messages.at(-1)?.content ?? "Workspace ready."}
                 </p>
               </div>
-              <Badge variant="secondary" className="inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm font-medium text-[var(--accent)]">
+              <Badge
+                variant="outline"
+                className="inline-flex w-fit items-center gap-2 rounded-full border-[var(--border)] bg-[var(--accent-soft)] px-3 py-1.5 text-xs font-medium text-[var(--accent)]"
+              >
                 {loading ? (
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <Bot className="h-4 w-4" />
+                  <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--accent)]" />
                 )}
                 {visibleStatus}
               </Badge>
             </div>
-          </section>
+          </motion.section>
 
-          <section className="grid gap-4 lg:grid-cols-2">
+          {/* Chart panels */}
+          <motion.section
+            variants={stagger.container}
+            initial="hidden"
+            animate="show"
+            className="grid gap-4 lg:grid-cols-2"
+          >
             {loading
-              ? Array.from({ length: 4 }).map((_, index) => <PanelSkeleton key={index} />)
-              : snapshot?.panels.map((panel) => <PanelCard key={panel.id} panel={panel} />)}
-          </section>
+              ? Array.from({ length: 4 }).map((_, index) => (
+                  <motion.div key={index} variants={stagger.item}>
+                    <PanelSkeleton />
+                  </motion.div>
+                ))
+              : snapshot?.panels.map((panel) => (
+                  <motion.div key={panel.id} variants={stagger.item}>
+                    <PanelCard panel={panel} />
+                  </motion.div>
+                ))}
+          </motion.section>
 
-          <section className="shell-panel panel-enter rounded-[28px] p-5 sm:p-6">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-secondary)]">
-                  Insight rail
-                </p>
-                <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                  Proactive notes generated from the first pass through the data.
-                </p>
-              </div>
-              <Badge variant="outline" className="rounded-full px-3 py-1 text-xs font-medium text-[var(--text-secondary)]">
-                {snapshot?.lastUpdatedAt
-                  ? new Date(snapshot.lastUpdatedAt).toLocaleTimeString()
-                  : "Updating..."}
-              </Badge>
-            </div>
-
-            <div className="mt-5 grid gap-3 lg:grid-cols-3">
-              {(snapshot?.insights ?? []).map((insight) => (
-                <Card
-                  key={insight}
-                  className="rounded-2xl border-[var(--border)] bg-white p-0 shadow-none transition hover:-translate-y-0.5 hover:shadow-md"
+          {/* Insights */}
+          {(snapshot?.insights ?? []).length > 0 ? (
+            <motion.section
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.5, duration: 0.4 }}
+              className="glass-card rounded-[24px] p-5 sm:p-6"
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-muted)]">
+                    Insight rail
+                  </p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    Proactive notes generated from the first pass through the data.
+                  </p>
+                </div>
+                <Badge
+                  variant="outline"
+                  className="rounded-full border-[var(--border)] bg-[var(--card)] px-3 py-1 text-xs text-[var(--text-secondary)]"
                 >
-                  <CardContent className="p-4">
-                    <div className="mb-3 h-1.5 w-10 rounded-full bg-[var(--accent)]" />
+                  {snapshot?.lastUpdatedAt
+                    ? new Date(snapshot.lastUpdatedAt).toLocaleTimeString()
+                    : "Updating…"}
+                </Badge>
+              </div>
+
+              <motion.div
+                variants={stagger.container}
+                initial="hidden"
+                animate="show"
+                className="mt-5 grid gap-3 lg:grid-cols-3"
+              >
+                {(snapshot?.insights ?? []).map((insight) => (
+                  <motion.div
+                    key={insight}
+                    variants={stagger.item}
+                    whileHover={{ y: -3, transition: { type: "spring", stiffness: 400 } }}
+                    className="glass-panel cursor-default rounded-2xl p-4"
+                  >
+                    <div className="mb-3 h-1 w-8 rounded-full bg-gradient-to-r from-[var(--accent)] to-[#a78bfa]" />
                     <p className="text-sm leading-6 text-[var(--foreground)]">{insight}</p>
-                    <Button
+                    <button
                       onClick={() => setQuery(insight)}
-                      variant="ghost"
-                      className="mt-4 h-auto px-0 py-0 text-xs font-medium text-[var(--accent)] hover:bg-transparent"
+                      className="mt-4 flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
                     >
                       Ask about this
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    </Button>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </section>
+                      <ChevronRight className="h-3 w-3" />
+                    </button>
+                  </motion.div>
+                ))}
+              </motion.div>
+            </motion.section>
+          ) : null}
 
-          {error ? <p className="text-sm text-[var(--danger)]">{error}</p> : null}
+          <AnimatePresence>
+            {error ? (
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="text-sm text-[var(--danger)]"
+              >
+                {error}
+              </motion.p>
+            ) : null}
+          </AnimatePresence>
         </section>
 
+        {/* Copilot sidebar */}
         <aside className="lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)]">
           <CopilotPanel
             snapshot={snapshot}
@@ -358,100 +451,132 @@ function KpiCard({
   delta?: string;
   tone?: string;
 }) {
-  const toneClass =
+  const TrendIcon =
+    tone === "positive" ? TrendingUp : tone === "warning" ? TrendingDown : Minus;
+  const toneColor =
     tone === "positive"
       ? "text-[var(--success)]"
       : tone === "warning"
-        ? "text-[var(--warning)]"
-        : "text-[var(--text-secondary)]";
+        ? "text-[var(--danger)]"
+        : "text-[var(--text-muted)]";
 
   return (
-    <Card className="shell-panel panel-enter rounded-[24px] border-[var(--border)] bg-white/90 shadow-none">
-      <CardContent className="p-4 sm:p-5">
-        <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-secondary)]">
-          {label}
+    <motion.div
+      whileHover={{ y: -2, transition: { type: "spring", stiffness: 400 } }}
+      className="glass-panel rounded-[20px] p-4 sm:p-5"
+    >
+      <p className="text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]">
+        {label}
+      </p>
+      <div className="mt-3 flex items-end justify-between gap-3">
+        <p className="min-w-0 flex-1 break-words text-[clamp(1.85rem,2.6vw,2.75rem)] font-semibold leading-none tracking-tight text-[var(--foreground)]">
+          {formatDisplayValue(value)}
         </p>
-        <div className="mt-3 flex items-end justify-between gap-3">
-          <p className="text-3xl font-semibold tracking-tight text-[var(--foreground)]">
-            {value || "-"}
-          </p>
-          <p className={cn("text-xs font-medium", toneClass)}>{delta}</p>
-        </div>
-      </CardContent>
-    </Card>
+        {delta ? (
+          <div
+            className={cn(
+              "flex shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium",
+              toneColor,
+            )}
+          >
+            <TrendIcon className="h-3.5 w-3.5" />
+            {delta}
+          </div>
+        ) : null}
+      </div>
+    </motion.div>
   );
 }
 
 function KpiSkeleton() {
-  return <Skeleton className="h-[110px] rounded-[24px] border border-[var(--border)]" />;
+  return <div className="skeleton h-[108px] rounded-[20px]" />;
 }
 
 function PanelSkeleton() {
   return (
-    <article className="shell-panel rounded-[24px] p-4">
+    <div className="glass-card rounded-[24px] p-4">
       <div className="space-y-3">
-        <Skeleton className="h-4 w-24 rounded-full" />
-        <Skeleton className="h-7 w-2/3 rounded-full" />
-        <Skeleton className="h-40 rounded-[20px]" />
+        <div className="skeleton h-3.5 w-20 rounded-full" />
+        <div className="skeleton h-6 w-2/3 rounded-full" />
+        <div className="skeleton h-44 rounded-[18px]" />
       </div>
-    </article>
+    </div>
   );
 }
 
 function PanelCard({ panel }: { panel: DashboardPanel }) {
   return (
-    <Card className="shell-panel panel-enter rounded-[26px] border-[var(--border)] bg-white shadow-none">
-      <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0 p-4 sm:p-5">
+    <motion.div
+      whileHover={{ y: -2, transition: { type: "spring", stiffness: 400 } }}
+      className="glass-card rounded-[24px]"
+    >
+      <div className="flex flex-row items-start justify-between gap-3 p-4 sm:p-5">
         <div className="space-y-1">
-          <CardTitle className="text-base font-semibold text-[var(--foreground)]">{panel.title}</CardTitle>
+          <CardTitle className="text-base font-semibold text-[var(--foreground)]">
+            {panel.title}
+          </CardTitle>
           <CardDescription className="text-sm leading-6 text-[var(--text-secondary)]">
             {panel.description}
           </CardDescription>
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="rounded-full">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="rounded-full text-[var(--text-muted)] hover:bg-[var(--card)] hover:text-[var(--foreground)]"
+            >
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          <DropdownMenuContent
+            align="end"
+            className="border-[var(--border)] bg-[var(--popover)] text-[var(--foreground)]"
+          >
             <DropdownMenuItem>Ask about this</DropdownMenuItem>
             <DropdownMenuItem>Regenerate</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-[var(--danger)] focus:text-[var(--danger)]">Remove</DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-[var(--border)]" />
+            <DropdownMenuItem className="text-[var(--danger)] focus:text-[var(--danger)]">
+              Remove
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-      </CardHeader>
+      </div>
 
-      <CardContent className="rounded-[20px] border border-[var(--border)] bg-[linear-gradient(180deg,#ffffff,#fbfaf8)] p-4">
+      <div className="mx-4 mb-4 rounded-[18px] border border-[var(--border)] bg-[var(--surface)] p-3">
         {panel.kind === "plotly" ? (
           <Plot
             data={panel.spec.data}
             layout={{
               autosize: true,
-              font: {
-                family: "var(--font-geist-sans)",
-                color: "#6b6966",
-              },
+              font: { family: "Inter, sans-serif", color: "#71717a", size: 11 },
               paper_bgcolor: "rgba(0,0,0,0)",
               plot_bgcolor: "rgba(0,0,0,0)",
+              margin: { t: 24, r: 12, b: 36, l: 36 },
+              xaxis: {
+                gridcolor: "rgba(255,255,255,0.06)",
+                zerolinecolor: "rgba(255,255,255,0.08)",
+              },
+              yaxis: {
+                gridcolor: "rgba(255,255,255,0.06)",
+                zerolinecolor: "rgba(255,255,255,0.08)",
+              },
               ...panel.spec.layout,
             }}
-            config={{
-              displayModeBar: false,
-              responsive: true,
-              ...panel.spec.config,
-            }}
+            config={{ displayModeBar: false, responsive: true, ...panel.spec.config }}
             useResizeHandler
-            style={{ width: "100%", height: "320px" }}
+            style={{ width: "100%", height: "280px" }}
           />
         ) : panel.kind === "table" ? (
-          <div className="overflow-x-auto">
+          <ScrollArea className="max-h-[320px] w-full">
             <table className="min-w-full text-left text-sm">
               <thead>
-                <tr className="border-b border-[var(--border)] text-[var(--text-secondary)]">
+                <tr className="border-b border-[var(--border)] text-[var(--text-muted)]">
                   {panel.columns.map((column) => (
-                    <th key={column} className="px-2 py-3 font-medium">
+                    <th
+                      key={column}
+                      className="px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em]"
+                    >
                       {column}
                     </th>
                   ))}
@@ -461,32 +586,34 @@ function PanelCard({ panel }: { panel: DashboardPanel }) {
                 {panel.rows.map((row, index) => (
                   <tr
                     key={index}
-                    className="border-b border-[var(--border)] last:border-none"
+                    className="border-b border-[var(--border)] last:border-none hover:bg-[var(--card)]"
                   >
                     {panel.columns.map((column) => (
-                      <td key={column} className="px-2 py-3 text-[var(--foreground)]">
-                        {String(row[column] ?? "-")}
+                      <td key={column} className="px-3 py-2 text-[var(--foreground)]">
+                        {String(row[column] ?? "—")}
                       </td>
                     ))}
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollArea>
         ) : (
           <iframe
             title={panel.title}
             sandbox="allow-same-origin"
-            srcDoc={`<!DOCTYPE html><html><body style="margin:0;font-family:Inter,system-ui,sans-serif;background:#fff;color:#111110;">${panel.html}</body></html>`}
-            className="h-[320px] w-full rounded-[18px] border-0 bg-white"
+            srcDoc={`<!DOCTYPE html><html><body style="margin:0;font-family:Inter,system-ui,sans-serif;background:transparent;color:#f2f2f3;">${panel.html}</body></html>`}
+            className="h-[280px] w-full rounded-[14px] border-0 bg-transparent"
           />
         )}
-      </CardContent>
+      </div>
 
       {panel.insight ? (
-        <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{panel.insight}</p>
+        <p className="px-4 pb-4 text-sm leading-6 text-[var(--text-secondary)]">
+          {panel.insight}
+        </p>
       ) : null}
-    </Card>
+    </motion.div>
   );
 }
 
@@ -509,122 +636,167 @@ function CopilotPanel({
   voiceActive: boolean;
   startVoiceCapture: () => void;
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [snapshot?.messages.length, submitting]);
+
   return (
-    <Card className="shell-panel panel-enter flex h-full flex-col rounded-[30px] border-[var(--border)] bg-white shadow-none">
-      <CardHeader className="space-y-4 p-4 sm:p-5">
+    <motion.div
+      initial={{ opacity: 0, x: 20 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.5, ease: "easeOut", delay: 0.2 }}
+      className="glass-panel flex h-full flex-col rounded-[28px]"
+    >
+      {/* Header */}
+      <div className="space-y-3 p-4 sm:p-5">
         <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-secondary)]">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-muted)]">
               Copilot
             </p>
-            <CardTitle className="mt-1 flex items-center gap-2 text-lg font-semibold text-[var(--foreground)]">
-              <Bot className="h-4 w-4 text-[var(--accent)]" />
-              Viewpilot
-            </CardTitle>
+            <div className="mt-1 flex items-center gap-2">
+              <div className="flex h-7 w-7 items-center justify-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent)]">
+                <Bot className="h-3.5 w-3.5" />
+              </div>
+              <h2 className="text-base font-semibold text-[var(--foreground)]">Viewpilot</h2>
+            </div>
           </div>
-          <Button size="lg" className="rounded-full text-sm">
-            Export PDF
-            <Download className="h-4 w-4" />
+          <Button
+            size="sm"
+            className="rounded-full bg-[var(--accent)] text-xs text-white hover:bg-indigo-500"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export
           </Button>
         </div>
-        <Separator className="bg-[var(--border)]" />
-      </CardHeader>
+        <div className="border-t border-[var(--border)]" />
+      </div>
 
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4 pt-0 sm:p-5 sm:pt-0">
-        <Card className="border-[var(--border)] bg-[rgba(238,242,255,0.6)] shadow-none">
-          <CardContent className="p-4">
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-              Session state
-            </p>
-            <p className="mt-2 text-sm leading-6 text-[var(--foreground)]">
-              {loading
-                ? "Loading the latest session snapshot."
-                : snapshot?.messages.at(-1)?.content ?? "Ready for your next prompt."}
-            </p>
-            <Badge variant="secondary" className="mt-3 inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-medium text-[var(--accent)]">
-              <div className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-              {loading ? "Syncing dashboard" : "Ready for prompts"}
-            </Badge>
-          </CardContent>
-        </Card>
-
-        <ScrollArea className="min-h-0 flex-1 pr-1">
-          <div className="space-y-3">
-            {(snapshot?.messages ?? []).map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
-            {submitting ? <StreamingPulse /> : null}
+      {/* Status bubble */}
+      <div className="px-4 sm:px-5">
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--accent-soft)] p-3">
+          <p className="text-xs text-[var(--text-secondary)]">
+            {loading
+              ? "Loading the latest session snapshot."
+              : snapshot?.messages.at(-1)?.content ?? "Ready for your next prompt."}
+          </p>
+          <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-[var(--accent)]">
+            <div
+              className={cn(
+                "h-1.5 w-1.5 rounded-full bg-[var(--accent)]",
+                loading && "animate-pulse",
+              )}
+            />
+            {loading ? "Syncing dashboard" : "Ready for prompts"}
           </div>
-        </ScrollArea>
+        </div>
+      </div>
 
-        <Card className="border-[var(--border)] bg-white shadow-none">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-              <Mic className={cn("h-3.5 w-3.5", voiceActive && "text-[var(--accent)]")} />
-              Voice or text
-            </div>
-            <div className="mt-3 rounded-[18px] border border-[var(--border)] bg-[var(--surface-soft)] p-3">
-              <textarea
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Compare Q1 vs Q2, find the strongest segment, or ask for a custom card."
-                className="min-h-28 w-full resize-none rounded-2xl border border-[var(--border)] bg-white px-4 py-3 text-sm text-[var(--foreground)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]"
-              />
-              <div className="mt-3 flex items-center gap-2">
-                <Button
-                  onClick={startVoiceCapture}
-                  type="button"
-                  variant={voiceActive ? "secondary" : "outline"}
-                  size="lg"
-                  className="rounded-full text-sm"
-                >
-                  <Mic className="h-4 w-4" />
-                  {voiceActive ? "Listening..." : "Voice"}
-                </Button>
-                <Button
-                  onClick={() => void submitQuery()}
-                  disabled={!query.trim() || submitting}
-                  size="lg"
-                  className="rounded-full text-sm"
-                >
-                  {submitting ? (
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <SendHorizonal className="h-4 w-4" />
-                  )}
-                  Send
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </CardContent>
-    </Card>
+      {/* Message list */}
+      <div ref={scrollRef} className="mt-4 min-h-0 flex-1 overflow-y-auto px-4 pb-2 sm:px-5">
+        <div className="space-y-3">
+          <AnimatePresence initial={false}>
+            {(snapshot?.messages ?? []).map((message) => (
+              <motion.div
+                key={message.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.25, ease: "easeOut" }}
+              >
+                <MessageBubble message={message} />
+              </motion.div>
+            ))}
+            {submitting ? (
+              <motion.div
+                key="streaming"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                <StreamingPulse />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        </div>
+      </div>
+
+      {/* Input */}
+      <div className="mt-2 p-4 sm:p-5">
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-1">
+          <textarea
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                void submitQuery();
+              }
+            }}
+            placeholder="Compare Q1 vs Q2, find the strongest segment…"
+            className="min-h-20 w-full resize-none rounded-xl bg-transparent px-3 py-2.5 text-sm text-[var(--foreground)] outline-none placeholder:text-[var(--text-muted)]"
+          />
+          <div className="flex items-center gap-2 px-2 pb-2">
+            <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
+              <Button
+                onClick={startVoiceCapture}
+                type="button"
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "rounded-full text-xs",
+                  voiceActive
+                    ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                    : "text-[var(--text-muted)] hover:bg-[var(--card)] hover:text-[var(--foreground)]",
+                )}
+              >
+                <Mic className="h-3.5 w-3.5" />
+                {voiceActive ? "Listening…" : "Voice"}
+              </Button>
+            </motion.div>
+            <div className="flex-1" />
+            <p className="text-xs text-[var(--text-muted)]">⌘↵ to send</p>
+            <motion.div whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}>
+              <Button
+                onClick={() => void submitQuery()}
+                disabled={!query.trim() || submitting}
+                size="sm"
+                className="rounded-full bg-[var(--accent)] text-xs text-white hover:bg-indigo-500 disabled:opacity-40"
+              >
+                {submitting ? (
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <SendHorizonal className="h-3.5 w-3.5" />
+                )}
+                Send
+              </Button>
+            </motion.div>
+          </div>
+        </div>
+      </div>
+    </motion.div>
   );
 }
 
-function MessageBubble({
-  message,
-}: {
-  message: DashboardState["messages"][number];
-}) {
+function MessageBubble({ message }: { message: DashboardState["messages"][number] }) {
   if (message.role === "user") {
     return (
-      <div className="ml-auto max-w-[88%] rounded-[22px] bg-[var(--accent-soft)] px-4 py-3 text-sm leading-6 text-[var(--foreground)]">
+      <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-sm bg-[var(--accent)] px-4 py-2.5 text-sm leading-6 text-white">
         {message.content}
       </div>
     );
   }
 
   return (
-    <div className="space-y-3 rounded-[22px] border border-[var(--border)] bg-white px-4 py-3">
-      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+    <div className="glass-card space-y-3 rounded-2xl rounded-bl-sm px-4 py-3">
+      <div className="flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
         <Bot className="h-3.5 w-3.5 text-[var(--accent)]" />
         {message.role === "assistant" ? "Assistant" : "System"}
       </div>
       <p className="text-sm leading-6 text-[var(--foreground)]">{message.content}</p>
       {message.code ? (
-        <pre className="overflow-x-auto rounded-[18px] bg-[#141414] p-4 text-xs leading-6 text-[#f3f3f3]">
+        <pre className="overflow-x-auto rounded-xl bg-[#0d0d0e] p-4 text-xs leading-6 text-[#c4c4c8]">
           <code>{message.code}</code>
         </pre>
       ) : null}
@@ -634,15 +806,15 @@ function MessageBubble({
 
 function StreamingPulse() {
   return (
-    <div className="rounded-[22px] border border-[var(--border)] bg-white px-4 py-3">
-      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-        <div className="h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
+    <div className="glass-card rounded-2xl rounded-bl-sm px-4 py-3">
+      <div className="mb-3 flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
+        <Bot className="h-3.5 w-3.5 text-[var(--accent)]" />
         Streaming
       </div>
-      <div className="mt-3 space-y-2">
-        <div className="skeleton h-3 w-3/4 rounded-full" />
-        <div className="skeleton h-3 w-2/3 rounded-full" />
-        <div className="skeleton h-3 w-1/2 rounded-full" />
+      <div className="space-y-2">
+        {[75, 60, 45].map((w) => (
+          <div key={w} className="skeleton h-2.5 rounded-full" style={{ width: `${w}%` }} />
+        ))}
       </div>
     </div>
   );
