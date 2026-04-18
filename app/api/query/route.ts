@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { runInvestorWorkflow } from "@/lib/agent-workflow";
+import {
+  formatQueryStageLabel,
+  runInvestorWorkflow,
+  WorkflowStageError,
+} from "@/lib/agent-workflow";
+import { summarizeQueryTrace } from "@/lib/query-trace-store";
 import { getSessionState, upsertSessionState } from "@/lib/server/session-store";
 import { makeId, nowIso } from "@/lib/utils";
 
@@ -46,8 +51,20 @@ export async function POST(request: Request) {
 
     return NextResponse.json(upsertSessionState(nextState));
   } catch (error) {
+    const traceSummary =
+      error instanceof WorkflowStageError
+        ? summarizeQueryTrace(error.traceId, {
+            code: error.code,
+            message: error.message,
+          })
+        : undefined;
+
     const nextState = upsertSessionState({
       ...session,
+      analysisState: {
+        ...session.analysisState,
+        lastQueryTraceSummary: traceSummary,
+      },
       messages: [
         ...session.messages,
         userMessage,
@@ -55,8 +72,10 @@ export async function POST(request: Request) {
           id: makeId("msg"),
           role: "assistant",
           content:
-            error instanceof Error
-              ? `I couldn’t complete that analysis yet. ${error.message}`
+            error instanceof WorkflowStageError
+              ? `I couldn’t complete that analysis. It failed during ${formatQueryStageLabel(error.stage)}. Trace ${error.traceId}.`
+              : error instanceof Error
+                ? `I couldn’t complete that analysis yet. ${error.message}`
               : fallbackAssistant,
           createdAt: nowIso(),
         },

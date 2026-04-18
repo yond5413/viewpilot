@@ -5,6 +5,42 @@ export type DataFieldType =
   | "date"
   | "unknown";
 
+export type SemanticRole =
+  | "dimension"
+  | "measure"
+  | "datetime"
+  | "identifier"
+  | "label"
+  | "text"
+  | "boolean";
+
+export type ChartFamily =
+  | "bar"
+  | "line"
+  | "area"
+  | "scatter"
+  | "histogram"
+  | "box"
+  | "pie"
+  | "table";
+
+export type AnalysisOpportunityKind =
+  | "overview"
+  | "ranking"
+  | "comparison"
+  | "distribution"
+  | "time_trend"
+  | "breakdown"
+  | "data_quality"
+  | "composition";
+
+export type CompositionTemplateKind =
+  | "overview"
+  | "ranking"
+  | "trend"
+  | "distribution"
+  | "data_quality";
+
 export type RequestClass =
   | "answer"
   | "kpi_update"
@@ -24,6 +60,97 @@ export type ExecutionPath =
   | "repair_python"
   | "downgrade_scope"
   | "narrative_only";
+
+export type QueryStage =
+  | "request_intake"
+  | "session_context"
+  | "route"
+  | "task_spec"
+  | "codegen"
+  | "sandbox_execution"
+  | "sandbox_result_parse"
+  | "validation"
+  | "critic"
+  | "mutation"
+  | "persist";
+
+export type StageErrorCode =
+  | "REQUEST_INVALID"
+  | "SESSION_NOT_READY"
+  | "SESSION_STATE_INVALID"
+  | "ROUTE_JSON_INVALID"
+  | "TASK_SPEC_JSON_INVALID"
+  | "CODEGEN_JSON_INVALID"
+  | "SANDBOX_EXECUTION_FAILED"
+  | "SANDBOX_RESULT_MISSING"
+  | "SANDBOX_RESULT_INVALID_JSON"
+  | "VALIDATION_REJECTED"
+  | "CRITIC_REJECTED"
+  | "PERSIST_FAILED";
+
+export type StageError = {
+  code: StageErrorCode;
+  message: string;
+  rawPreview?: string;
+};
+
+export type StageResult<T> = {
+  stage: QueryStage;
+  ok: boolean;
+  data?: T;
+  error?: StageError;
+  debug: {
+    startedAt: string;
+    finishedAt: string;
+    durationMs: number;
+  };
+};
+
+export type QueryTraceEvent = {
+  stage: QueryStage;
+  ok: boolean;
+  summary: string;
+  durationMs: number;
+  rawPreview?: string;
+  metadata?: Record<string, string | number | boolean | null>;
+};
+
+export type QueryTrace = {
+  traceId: string;
+  sessionId: string;
+  prompt: string;
+  createdAt: string;
+  events: QueryTraceEvent[];
+  finalStatus: "success" | "fallback" | "error";
+  failedStage?: QueryStage;
+};
+
+export type QueryTraceSummary = {
+  traceId: string;
+  createdAt: string;
+  finalStatus: QueryTrace["finalStatus"];
+  failedStage?: QueryStage;
+  errorCode?: StageErrorCode;
+  errorMessage?: string;
+  stageCount: number;
+};
+
+export type AnalysisStreamEvent = {
+  id: string;
+  sessionId: string;
+  traceId?: string;
+  ts: string;
+  type:
+    | "stage_started"
+    | "stage_progress"
+    | "stage_warning"
+    | "stage_result"
+    | "stage_failed"
+    | "analysis_complete";
+  stage?: QueryStage | "stream";
+  message: string;
+  payload?: Record<string, string | number | boolean | null>;
+};
 
 export type TaskKind =
   | "metric"
@@ -129,6 +256,49 @@ export type DatasetProfile = {
   sampleRows: Array<Record<string, string | number | boolean | null>>;
 };
 
+export type ColumnAnalysisMemory = {
+  name: string;
+  inferredType: DataFieldType;
+  semanticRole: SemanticRole;
+  nullRate: number;
+  distinctCount: number;
+  uniquenessRatio: number;
+  topValues: Array<{
+    value: string;
+    count: number;
+  }>;
+  numericSummary?: {
+    min: number;
+    max: number;
+    mean: number;
+    median: number;
+    std: number;
+  };
+  isRecommendedDimension: boolean;
+  isRecommendedMeasure: boolean;
+};
+
+export type AnalysisOpportunity = {
+  id: string;
+  kind: AnalysisOpportunityKind;
+  title: string;
+  chartFamily: ChartFamily;
+  confidence: number;
+  rationale: string;
+  dimension?: string;
+  measure?: string;
+  dateColumn?: string;
+};
+
+export type AnalysisMemory = {
+  columns: ColumnAnalysisMemory[];
+  primaryDimensions: string[];
+  primaryMeasures: string[];
+  dateCandidates: string[];
+  dataQualityWarnings: string[];
+  opportunities: AnalysisOpportunity[];
+};
+
 export type AgentMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -175,6 +345,13 @@ export type TaskSpec = {
   };
   routeClass: RequestClass;
   scope: AnalysisScope;
+  composition: {
+    template: CompositionTemplateKind;
+    primaryChartFamily?: ChartFamily;
+    supportPanelAllowed: boolean;
+    targetKpis: number;
+    targetPanels: number;
+  };
   successCriteria: string[];
 };
 
@@ -192,13 +369,14 @@ export type ExecutionEnvelope = {
   status: "success" | "error";
   code: string;
   model: string;
-  result?: AnalysisCandidate;
   stdout: string;
   stderr: string;
   errorMessage?: string;
   artifactPaths: string[];
   runtimeMs: number;
   cacheCandidates: Record<string, unknown>;
+  resultRaw?: string;
+  resultSource: "file" | "stdout" | "none";
 };
 
 export type ValidationResult = {
@@ -234,6 +412,7 @@ export type DashboardMutation = {
 
 export type TaskHistoryEntry = {
   id: string;
+  queryTraceId?: string;
   prompt: string;
   createdAt: string;
   route: AnalysisRoute;
@@ -266,6 +445,7 @@ export type SessionObservability = {
 export type SessionAnalysisState = {
   datasetFingerprint?: string;
   profile?: DatasetProfile;
+  analysisMemory?: AnalysisMemory;
   validatedMetrics: KPI[];
   validatedPanels: DashboardPanel[];
   cachedResults: Record<string, unknown>;
@@ -274,6 +454,7 @@ export type SessionAnalysisState = {
   artifacts: string[];
   currentDashboardVersion: number;
   observability: SessionObservability;
+  lastQueryTraceSummary?: QueryTraceSummary;
 };
 
 export type DashboardState = {

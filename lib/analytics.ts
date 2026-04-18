@@ -1,7 +1,10 @@
 import OpenAI from "openai";
+import { inferCompositionPlan } from "@/lib/composition-templates";
 import { env, hasLLM } from "@/lib/env";
 import type {
+  AnalysisMemory,
   AnalysisRoute,
+  AnalysisOpportunity,
   CriticDecision,
   DashboardPanel,
   DatasetProfile,
@@ -17,8 +20,57 @@ const llmClient = hasLLM
     })
   : null;
 
-const parseMessageContent = (content: unknown) =>
-  typeof content === "string" ? content : JSON.stringify(content ?? {});
+const parseMessageContent = (content: unknown) => {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        if (part && typeof part === "object" && "text" in part) {
+          const text = part.text;
+          return typeof text === "string" ? text : "";
+        }
+
+        return "";
+      })
+      .join("\n")
+      .trim();
+  }
+
+  return JSON.stringify(content ?? {});
+};
+
+const extractJsonObject = (content: string) => {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]?.trim();
+  const candidate = fenced || trimmed;
+
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+
+    if (start >= 0 && end > start) {
+      return JSON.parse(candidate.slice(start, end + 1));
+    }
+
+    throw new Error("Model did not return a valid JSON object.");
+  }
+};
+
+const sanitizeAssistantMessage = (message: string) =>
+  message
+    .replace(/�+\?+/g, ", ")
+    .replace(/\s+,/g, ",")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 
 const callJsonModel = async <T>(
   model: string,
@@ -41,11 +93,18 @@ const callJsonModel = async <T>(
     return null;
   }
 
-  return JSON.parse(content) as T;
+  try {
+    return extractJsonObject(content) as T;
+  } catch {
+    return null;
+  }
 };
 
 const heuristicRoute = (prompt: string): AnalysisRoute => {
   const normalizedPrompt = prompt.toLowerCase();
+  const wantsMetrics = /\bkpi|metric|headline|summary|summarize\b/.test(normalizedPrompt);
+  const wantsChart = /\bchart|plot|graph|trend|scatter|bar\b/.test(normalizedPrompt);
+  const wantsTable = /\btable|top\b/.test(normalizedPrompt);
 
   if (/\bdebug|diagnostic|why did|what happened|error\b/.test(normalizedPrompt)) {
     return {
@@ -73,7 +132,20 @@ const heuristicRoute = (prompt: string): AnalysisRoute => {
     };
   }
 
-  if (/\bkpi|metric|headline\b/.test(normalizedPrompt)) {
+  if ((wantsMetrics && wantsChart) || (wantsMetrics && wantsTable)) {
+    return {
+      id: makeId("route"),
+      requestClass: "dashboard_refresh",
+      scope: "full_rebuild",
+      confidence: 0.88,
+      urgency: "high",
+      allowedFallbackDepth: 6,
+      shouldMutateDashboard: true,
+      summary: "Composite request for metrics plus supporting visuals.",
+    };
+  }
+
+  if (wantsMetrics) {
     return {
       id: makeId("route"),
       requestClass: "kpi_update",
@@ -86,7 +158,7 @@ const heuristicRoute = (prompt: string): AnalysisRoute => {
     };
   }
 
-  if (/\bchart|plot|graph|trend|scatter|bar\b/.test(normalizedPrompt)) {
+  if (wantsChart) {
     return {
       id: makeId("route"),
       requestClass: "panel_add",
@@ -99,7 +171,7 @@ const heuristicRoute = (prompt: string): AnalysisRoute => {
     };
   }
 
-  if (/\btable|top\b/.test(normalizedPrompt)) {
+  if (wantsTable) {
     return {
       id: makeId("route"),
       requestClass: "panel_replace",
@@ -124,7 +196,57 @@ const heuristicRoute = (prompt: string): AnalysisRoute => {
   };
 };
 
+const pickOpportunity = (
+  memory: AnalysisMemory | undefined,
+  kind: AnalysisOpportunity["kind"],
+) => memory?.opportunities.find((item) => item.kind === kind);
+
+const inferHeuristicRoute = (prompt: string, memory?: AnalysisMemory) => {
+  const fallback = heuristicRoute(prompt);
+  const normalizedPrompt = prompt.toLowerCase();
+  const wantsDistribution = /\bdistribution|spread|histogram|variance|quartile|box\b/.test(
+    normalizedPrompt,
+  );
+  const wantsTrend = /\btrend|over time|month|quarter|year|timeline\b/.test(normalizedPrompt);
+  const wantsComparison = /\bcompare|vs\b/.test(normalizedPrompt);
+
+  if (wantsTrend && memory?.dateCandidates.length) {
+    return {
+      ...fallback,
+      requestClass: "dashboard_refresh",
+      scope: "full_rebuild",
+      confidence: 0.9,
+      summary: `Time-series analysis using ${memory.dateCandidates[0]}.`,
+    } satisfies AnalysisRoute;
+  }
+
+  if (wantsDistribution && pickOpportunity(memory, "distribution")) {
+    return {
+      ...fallback,
+      requestClass: /\bsummarize|summary|metric\b/.test(normalizedPrompt)
+        ? "dashboard_refresh"
+        : "panel_add",
+      scope: "incremental_execution",
+      confidence: 0.86,
+      summary: "Distribution-focused exploratory request.",
+    } satisfies AnalysisRoute;
+  }
+
+  if (wantsComparison && pickOpportunity(memory, "comparison")) {
+    return {
+      ...fallback,
+      requestClass: "dashboard_refresh",
+      scope: "full_rebuild",
+      confidence: 0.87,
+      summary: "Comparison request backed by candidate dimensions and measures.",
+    } satisfies AnalysisRoute;
+  }
+
+  return fallback;
+};
+
 const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
+  const composition = inferCompositionPlan({ route, prompt });
   const responseType =
     route.requestClass === "dashboard_refresh"
       ? "dashboard"
@@ -172,8 +294,8 @@ const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
             ? ["plotly", "table", "html"]
             : [],
     displayConstraints: {
-      maxKpis: 4,
-      maxPanels: responseType === "dashboard" ? 3 : 1,
+      maxKpis: composition.targetKpis || 4,
+      maxPanels: responseType === "dashboard" ? composition.targetPanels : 1,
       maxRows: 5,
       maxLabelLength: 28,
       maxValueLength: 18,
@@ -187,11 +309,13 @@ const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
     ],
     expectedOutputs: {
       narrative: true,
-      kpis: responseType === "dashboard",
-      panels: responseType === "chart" || responseType === "table" || responseType === "dashboard",
+      kpis: composition.targetKpis > 0 && responseType === "dashboard",
+      panels:
+        responseType === "chart" || responseType === "table" || composition.targetPanels > 0,
     },
     routeClass: route.requestClass,
     scope: route.scope,
+    composition,
     successCriteria: [
       "Answer the user request directly",
       "Keep the output readable in the dashboard shell",
@@ -211,6 +335,7 @@ export const parseExplorePayload = (raw: string) => {
 
   return JSON.parse(profileLine.replace("EXPLORE_JSON:", "")) as {
     profile: DatasetProfile;
+    analysisMemory: AnalysisMemory;
     kpis: KPI[];
     panels: DashboardPanel[];
     insights: string[];
@@ -219,26 +344,45 @@ export const parseExplorePayload = (raw: string) => {
 
 export const buildInitialDashboard = (payload: {
   profile: DatasetProfile;
+  analysisMemory: AnalysisMemory;
   kpis: KPI[];
   panels: DashboardPanel[];
   insights: string[];
 }) => payload;
 
-const fallbackSuggestedPrompts = (profile: DatasetProfile) => {
+const fallbackSuggestedPrompts = (profile: DatasetProfile, analysisMemory?: AnalysisMemory) => {
   const prompts = [
     `Build an executive dashboard for ${profile.filename} with the most important KPIs and supporting charts.`,
     `Summarize the biggest patterns, concentration, and outliers in ${profile.filename}.`,
   ];
 
-  if (profile.categoricalColumns[0] && profile.numericColumns[0]) {
+  const rankingOpportunity = pickOpportunity(analysisMemory, "ranking");
+  const distributionOpportunity = pickOpportunity(analysisMemory, "distribution");
+  const trendOpportunity = pickOpportunity(analysisMemory, "time_trend");
+
+  if (rankingOpportunity?.dimension && rankingOpportunity.measure) {
+    prompts.push(
+      `Compare the top ${rankingOpportunity.dimension} values by ${rankingOpportunity.measure} and explain the biggest drivers.`,
+    );
+  } else if (profile.categoricalColumns[0] && profile.numericColumns[0]) {
     prompts.push(
       `Compare the top ${profile.categoricalColumns[0]} values by ${profile.numericColumns[0]} and explain the biggest drivers.`,
     );
   }
 
-  if (profile.datetimeColumns[0] && profile.numericColumns[0]) {
+  if (trendOpportunity?.measure && trendOpportunity.dateColumn) {
+    prompts.push(
+      `Show the trend of ${trendOpportunity.measure} over ${trendOpportunity.dateColumn} and call out notable shifts.`,
+    );
+  } else if (profile.datetimeColumns[0] && profile.numericColumns[0]) {
     prompts.push(
       `Show the trend of ${profile.numericColumns[0]} over ${profile.datetimeColumns[0]} and call out notable shifts.`,
+    );
+  }
+
+  if (distributionOpportunity?.measure) {
+    prompts.push(
+      `Analyze the distribution of ${distributionOpportunity.measure} and highlight skew, spread, and outliers.`,
     );
   }
 
@@ -251,9 +395,10 @@ const fallbackSuggestedPrompts = (profile: DatasetProfile) => {
 
 export const generateSuggestedPrompts = async (args: {
   profile: DatasetProfile;
+  analysisMemory?: AnalysisMemory;
   insights?: string[];
 }) => {
-  const fallback = fallbackSuggestedPrompts(args.profile);
+  const fallback = fallbackSuggestedPrompts(args.profile, args.analysisMemory);
   const parsed = await callJsonModel<{ suggestedPrompts?: string[] }>(
     env.mistralSummaryModel,
     [
@@ -282,10 +427,11 @@ export const generateSuggestedPrompts = async (args: {
 
 export const routeAnalysisRequest = async (args: {
   profile: DatasetProfile;
+  analysisMemory?: AnalysisMemory;
   prompt: string;
   contextSummary: string;
 }) => {
-  const fallback = heuristicRoute(args.prompt);
+  const fallback = inferHeuristicRoute(args.prompt, args.analysisMemory);
   const parsed = await callJsonModel<{
     requestClass?: AnalysisRoute["requestClass"];
     scope?: AnalysisRoute["scope"];
@@ -298,7 +444,7 @@ export const routeAnalysisRequest = async (args: {
     {
       role: "system",
       content:
-        "You are the routing stage of an analytics agent. Return strict JSON with keys requestClass, scope, confidence, urgency, allowedFallbackDepth, shouldMutateDashboard, and summary. Allowed requestClass values: answer, kpi_update, panel_add, panel_replace, dashboard_refresh, diagnostic. Allowed scope values: cached_only, incremental_execution, full_rebuild. Narrative or explanatory asks should not mutate the dashboard by default.",
+        "You are the routing stage of an analytics agent. Return strict JSON with keys requestClass, scope, confidence, urgency, allowedFallbackDepth, shouldMutateDashboard, and summary. Allowed requestClass values: answer, kpi_update, panel_add, panel_replace, dashboard_refresh, diagnostic. Allowed scope values: cached_only, incremental_execution, full_rebuild. Narrative or explanatory asks should not mutate the dashboard by default. If the user asks for both KPI/summary metrics and a chart or table in the same request, prefer dashboard_refresh so the workflow can return a composed update instead of a single narrow panel.",
     },
     {
       role: "user",
@@ -337,15 +483,19 @@ export const routeAnalysisRequest = async (args: {
 export const createTaskSpec = async (args: {
   route: AnalysisRoute;
   profile: DatasetProfile;
+  analysisMemory?: AnalysisMemory;
   prompt: string;
   contextSummary: string;
 }) => {
-  const fallback = heuristicTaskSpec(args.route, args.prompt);
+  const fallback = {
+    ...heuristicTaskSpec(args.route, args.prompt),
+    composition: inferCompositionPlan(args),
+  };
   const parsed = await callJsonModel<Partial<TaskSpec>>(env.mistralRouterModel, [
     {
       role: "system",
       content:
-        "You are the task planning stage of an analytics agent. Return strict JSON shaped like a TaskSpec with keys kind, title, businessQuestion, responseType, executionPath, acceptablePanelKinds, displayConstraints, cacheKey, validationRules, expectedOutputs, successCriteria. Do not emit final UI payloads. Do not emit Python code. Keep the task bounded and execution-safe.",
+        "You are the task planning stage of an analytics agent. Return strict JSON shaped like a TaskSpec with keys kind, title, businessQuestion, responseType, executionPath, acceptablePanelKinds, displayConstraints, cacheKey, validationRules, expectedOutputs, composition, and successCriteria. Do not emit final UI payloads. Do not emit Python code. Keep the task bounded and execution-safe. If the route is dashboard_refresh or the prompt asks for both summary metrics and a visual, plan for a dashboard response with concise KPIs plus one supporting panel when possible.",
     },
     {
       role: "user",
@@ -409,6 +559,10 @@ export const createTaskSpec = async (args: {
       ...fallback.expectedOutputs,
       ...parsed.expectedOutputs,
     },
+    composition: {
+      ...fallback.composition,
+      ...(parsed.composition && typeof parsed.composition === "object" ? parsed.composition : {}),
+    },
     successCriteria: Array.isArray(parsed.successCriteria)
       ? parsed.successCriteria.filter((item): item is string => typeof item === "string").slice(0, 6)
       : fallback.successCriteria,
@@ -428,7 +582,7 @@ export const generateAnalysisCode = async (args: {
     {
       role: "system",
       content:
-        "You generate Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. The code must read /home/user/data.csv, may use pandas/numpy/json, and must print exactly one line prefixed VIEWPILOT_RESULT: followed by a JSON object. The JSON envelope may contain keys title, narrative, kpis, panels, insights, cache, artifacts. Panels must be either plotly or table panels shaped for a dashboard. Keep the task bounded and stakeholder-ready. Never return markdown fences.",
+        "You generate Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. The code must read /home/user/data.csv, may use pandas/numpy/json, and must write the final machine-readable JSON object to /home/user/viewpilot/query-result.json. Stdout is for lightweight human logs only, not the final result. The JSON envelope may contain keys title, narrative, kpis, panels, insights, cache, artifacts. Respect taskSpec.composition: if targetKpis > 0, return a concise KPI package; if targetPanels is 2 and supportPanelAllowed is true, try to return one strong primary panel plus one support panel only when the second panel adds genuine signal. Every value written to JSON must already be JSON serializable: convert pandas Series/Index/ndarray to Python lists, convert numpy scalars to Python scalars, and do not place DataFrame or Series objects directly in the result. Plotly panels must use this exact shape: {\"kind\":\"plotly\",\"title\":string,\"description\":string,\"spec\":{\"data\":Array<Record<string, unknown>>,\"layout\"?:Record<string, unknown>,\"config\"?:Record<string, unknown>}}. Table panels must use {\"kind\":\"table\",\"title\":string,\"description\":string,\"columns\":string[],\"rows\":Array<Record<string, unknown>>}. Keep the task bounded and stakeholder-ready. Never return markdown fences.",
     },
     {
       role: "user",
@@ -464,7 +618,7 @@ export const repairAnalysisCode = async (args: {
     {
       role: "system",
       content:
-        "You repair Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. Fix the failure using the stderr and validation feedback. Keep the code bounded to the original task. The repaired code must still print exactly one line prefixed VIEWPILOT_RESULT: followed by a JSON object.",
+        "You repair Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. Fix the failure using the stderr and validation feedback. Keep the code bounded to the original task. The repaired code must write the final machine-readable JSON object to /home/user/viewpilot/query-result.json, and stdout should only contain lightweight human logs. Respect taskSpec.composition when deciding how many KPIs and panels to return. Every JSON value must already be JSON serializable: convert pandas Series/Index/ndarray to Python lists, convert numpy scalars to Python scalars, and never place DataFrame or Series objects directly in the result. Plotly panels must use the exact dashboard schema with kind, title, description, and spec.data/spec.layout/spec.config.",
     },
     {
       role: "user",
@@ -547,13 +701,15 @@ export const composeAssistantMessage = async (args: {
   taskSpec: TaskSpec;
   mutationSummary: string;
   insights: string[];
+  kpiLabels: string[];
+  panelTitles: string[];
   narrative?: string;
 }) => {
   const parsed = await callJsonModel<{ message?: string }>(env.mistralSummaryModel, [
     {
       role: "system",
       content:
-        "You compose concise investor-grade analytics assistant responses. Return strict JSON with a single key `message`. The message should explain what was updated or why the dashboard was preserved, with crisp stakeholder language.",
+        "You compose concise investor-grade analytics assistant responses. Return strict JSON with a single key `message`. The message should explain what was updated or why the dashboard was preserved, with crisp stakeholder language. Mention the real KPI labels and panel titles when available. Never invent placeholder values or fake metrics.",
     },
     {
       role: "user",
@@ -561,8 +717,12 @@ export const composeAssistantMessage = async (args: {
     },
   ]);
 
-  if (parsed?.message?.trim()) {
-    return parsed.message.trim();
+  const message = parsed?.message?.trim();
+  if (
+    message &&
+    !/\bX\.XX\b|\bXX\b|\$X\.|\bplaceholder\b/i.test(message)
+  ) {
+    return sanitizeAssistantMessage(message);
   }
 
   if (args.narrative?.trim()) {

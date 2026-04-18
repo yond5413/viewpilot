@@ -18,7 +18,7 @@ import {
   Minus,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import type { DashboardPanel, DashboardState } from "@/lib/types";
+import type { AnalysisStreamEvent, DashboardPanel, DashboardState } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -112,6 +112,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voiceActive, setVoiceActive] = useState(false);
+  const [streamEvents, setStreamEvents] = useState<AnalysisStreamEvent[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -147,10 +148,32 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
     return snapshot?.status || "Ready";
   }, [loading, snapshot?.status]);
 
+  useEffect(() => {
+    if (!submitting) {
+      return;
+    }
+
+    const eventSource = new EventSource(`/api/query-stream/${encodeURIComponent(sessionId)}`);
+    eventSource.addEventListener("progress", (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as AnalysisStreamEvent;
+        setStreamEvents((current) => [...current, payload].slice(-24));
+      } catch {
+        // Ignore malformed progress events.
+      }
+    });
+    eventSource.onerror = () => {
+      eventSource.close();
+    };
+
+    return () => eventSource.close();
+  }, [sessionId, submitting]);
+
   const submitQuery = async () => {
     if (!query.trim() || submitting) return;
     setSubmitting(true);
     setError(null);
+    setStreamEvents([]);
 
     try {
       const response = await fetch("/api/query", {
@@ -430,6 +453,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
             query={query}
             setQuery={setQuery}
             submitting={submitting}
+            streamEvents={streamEvents}
             submitQuery={submitQuery}
             voiceActive={voiceActive}
             startVoiceCapture={startVoiceCapture}
@@ -623,6 +647,7 @@ function CopilotPanel({
   query,
   setQuery,
   submitting,
+  streamEvents,
   submitQuery,
   voiceActive,
   startVoiceCapture,
@@ -632,6 +657,7 @@ function CopilotPanel({
   query: string;
   setQuery: (value: string) => void;
   submitting: boolean;
+  streamEvents: AnalysisStreamEvent[];
   submitQuery: () => Promise<void>;
   voiceActive: boolean;
   startVoiceCapture: () => void;
@@ -682,7 +708,11 @@ function CopilotPanel({
           <p className="text-xs text-[var(--text-secondary)]">
             {loading
               ? "Loading the latest session snapshot."
-              : snapshot?.messages.at(-1)?.content ?? "Ready for your next prompt."}
+              : submitting && streamEvents.length > 0
+                ? streamEvents.at(-1)?.message
+                : submitting
+                  ? "Working through the analysis plan and validating results."
+                  : snapshot?.messages.at(-1)?.content ?? "Ready for your next prompt."}
           </p>
           <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-[var(--accent)]">
             <div
@@ -691,7 +721,11 @@ function CopilotPanel({
                 loading && "animate-pulse",
               )}
             />
-            {loading ? "Syncing dashboard" : "Ready for prompts"}
+            {loading
+              ? "Syncing dashboard"
+              : submitting
+                ? streamEvents.at(-1)?.stage?.replace(/_/g, " ") || "Running analysis"
+                : "Ready for prompts"}
           </div>
         </div>
       </div>
@@ -716,7 +750,7 @@ function CopilotPanel({
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
               >
-                <StreamingPulse />
+                <StreamingPulse events={streamEvents} />
               </motion.div>
             ) : null}
           </AnimatePresence>
@@ -804,18 +838,31 @@ function MessageBubble({ message }: { message: DashboardState["messages"][number
   );
 }
 
-function StreamingPulse() {
+function StreamingPulse({ events }: { events: AnalysisStreamEvent[] }) {
   return (
     <div className="glass-card rounded-2xl rounded-bl-sm px-4 py-3">
       <div className="mb-3 flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
         <Bot className="h-3.5 w-3.5 text-[var(--accent)]" />
         Streaming
       </div>
-      <div className="space-y-2">
-        {[75, 60, 45].map((w) => (
-          <div key={w} className="skeleton h-2.5 rounded-full" style={{ width: `${w}%` }} />
-        ))}
-      </div>
+      {events.length > 0 ? (
+        <div className="space-y-2">
+          {events.slice(-4).map((event) => (
+            <div key={event.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
+              <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-muted)]">
+                {(event.stage || "progress").replace(/_/g, " ")}
+              </p>
+              <p className="mt-1 text-sm leading-6 text-[var(--foreground)]">{event.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {[75, 60, 45].map((w) => (
+            <div key={w} className="skeleton h-2.5 rounded-full" style={{ width: `${w}%` }} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

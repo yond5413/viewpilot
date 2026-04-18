@@ -2,12 +2,13 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Sandbox } from "@e2b/code-interpreter";
 import { env } from "@/lib/env";
-import type { SessionAnalysisState } from "@/lib/types";
+import type { AnalysisMemory, QueryTraceSummary, SessionAnalysisState } from "@/lib/types";
 
 const SANDBOX_DATA_PATH = "/home/user/data.csv";
 const SANDBOX_SCRIPT_DIR = "/home/user/viewpilot";
 const SANDBOX_SOURCE_CONFIG_PATH = `${SANDBOX_SCRIPT_DIR}/source-config.json`;
 const SANDBOX_SESSION_STATE_PATH = `${SANDBOX_SCRIPT_DIR}/session-state.json`;
+const SANDBOX_QUERY_RESULT_PATH = `${SANDBOX_SCRIPT_DIR}/query-result.json`;
 const LOCAL_SCRIPT_DIR = path.join(process.cwd(), "sandbox-scripts");
 
 const scriptPaths = [
@@ -21,6 +22,7 @@ export const sandboxPaths = {
   scriptDir: SANDBOX_SCRIPT_DIR,
   sourceConfig: SANDBOX_SOURCE_CONFIG_PATH,
   sessionState: SANDBOX_SESSION_STATE_PATH,
+  queryResult: SANDBOX_QUERY_RESULT_PATH,
 };
 
 export const createSandbox = async () => {
@@ -89,12 +91,42 @@ export const runLoadSourceScript = async (sandbox: Sandbox) => {
   return execution.logs.stdout.join("");
 };
 
-export const runPythonAnalysis = async (sandbox: Sandbox, code: string) => {
+type RunPythonAnalysisCallbacks = {
+  onStdout?: (line: string) => void;
+  onStderr?: (line: string) => void;
+  onResult?: (result: unknown) => void;
+};
+
+const getStreamLine = (value: unknown) => {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value && typeof value === "object" && "line" in value) {
+    const line = (value as { line?: unknown }).line;
+    return typeof line === "string" ? line : "";
+  }
+
+  return "";
+};
+
+export const runPythonAnalysis = async (
+  sandbox: Sandbox,
+  code: string,
+  callbacks?: RunPythonAnalysisCallbacks,
+) => {
+  await clearSandboxFile(sandbox, SANDBOX_QUERY_RESULT_PATH);
+
   const startTime = Date.now();
   const execution = await sandbox.runCode(code, {
     language: "python",
     timeoutMs: 120_000,
+    onStdout: (data) => callbacks?.onStdout?.(getStreamLine(data)),
+    onStderr: (data) => callbacks?.onStderr?.(getStreamLine(data)),
+    onResult: (result) => callbacks?.onResult?.(result),
   });
+
+  const resultFile = await readSandboxTextFile(sandbox, SANDBOX_QUERY_RESULT_PATH);
 
   return {
     stdout: execution.logs.stdout.join(""),
@@ -107,39 +139,23 @@ export const runPythonAnalysis = async (sandbox: Sandbox, code: string) => {
         }
       : null,
     runtimeMs: Date.now() - startTime,
+    resultFile,
   };
 };
 
 export const loadSessionAnalysisStateFromSandbox = async (
   sandbox: Sandbox,
 ): Promise<SessionAnalysisState | null> => {
-  const execution = await runPythonAnalysis(
-    sandbox,
-    `
-from pathlib import Path
-
-path = Path("${SANDBOX_SESSION_STATE_PATH}")
-if path.exists():
-    print("SESSION_STATE_JSON:" + path.read_text())
-else:
-    print("SESSION_STATE_JSON:null")
-    `.trim(),
-  );
-
-  const sessionLine = execution.stdout
-    .split("\n")
-    .find((line) => line.startsWith("SESSION_STATE_JSON:"));
-
-  if (!sessionLine) {
+  const payload = await readSandboxTextFile(sandbox, SANDBOX_SESSION_STATE_PATH);
+  if (!payload?.trim()) {
     return null;
   }
 
-  const payload = sessionLine.replace("SESSION_STATE_JSON:", "").trim();
-  if (!payload || payload === "null") {
+  try {
+    return coerceSessionAnalysisState(JSON.parse(payload));
+  } catch {
     return null;
   }
-
-  return JSON.parse(payload) as SessionAnalysisState;
 };
 
 export const writeSessionAnalysisStateToSandbox = async (
@@ -152,6 +168,189 @@ export const writeSessionAnalysisStateToSandbox = async (
       data: JSON.stringify(state, null, 2),
     },
   ]);
+};
+
+const clearSandboxFile = async (sandbox: Sandbox, filePath: string) => {
+  await sandbox.runCode(
+    `
+from pathlib import Path
+
+path = Path(${JSON.stringify(filePath)})
+if path.exists():
+    path.unlink()
+    `.trim(),
+    {
+      language: "python",
+      timeoutMs: 15_000,
+    },
+  );
+};
+
+const readSandboxTextFile = async (sandbox: Sandbox, filePath: string) => {
+  const execution = await sandbox.runCode(
+    `
+from pathlib import Path
+import json
+
+path = Path(${JSON.stringify(filePath)})
+payload = {
+    "exists": path.exists(),
+    "content": path.read_text() if path.exists() else None,
+}
+print("SANDBOX_FILE_JSON:" + json.dumps(payload))
+    `.trim(),
+    {
+      language: "python",
+      timeoutMs: 15_000,
+    },
+  );
+
+  const payloadLine = execution.logs.stdout
+    .join("")
+    .split("\n")
+    .find((line) => line.startsWith("SANDBOX_FILE_JSON:"));
+
+  if (!payloadLine) {
+    return null;
+  }
+
+  const payload = JSON.parse(payloadLine.replace("SANDBOX_FILE_JSON:", "")) as {
+    exists?: boolean;
+    content?: string | null;
+  };
+
+  return payload.exists ? payload.content ?? null : null;
+};
+
+const coerceSessionAnalysisState = (value: unknown): SessionAnalysisState | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const observability = coerceObservability(candidate.observability);
+  if (!observability) {
+    return null;
+  }
+
+  return {
+    datasetFingerprint:
+      typeof candidate.datasetFingerprint === "string" ? candidate.datasetFingerprint : undefined,
+    profile:
+      candidate.profile && typeof candidate.profile === "object"
+        ? (candidate.profile as SessionAnalysisState["profile"])
+        : undefined,
+    analysisMemory: coerceAnalysisMemory(candidate.analysisMemory),
+    validatedMetrics: Array.isArray(candidate.validatedMetrics)
+      ? (candidate.validatedMetrics as SessionAnalysisState["validatedMetrics"])
+      : [],
+    validatedPanels: Array.isArray(candidate.validatedPanels)
+      ? (candidate.validatedPanels as SessionAnalysisState["validatedPanels"])
+      : [],
+    cachedResults:
+      candidate.cachedResults && typeof candidate.cachedResults === "object"
+        ? (candidate.cachedResults as Record<string, unknown>)
+        : {},
+    taskHistory: Array.isArray(candidate.taskHistory)
+      ? (candidate.taskHistory as SessionAnalysisState["taskHistory"])
+      : [],
+    failedPatterns: Array.isArray(candidate.failedPatterns)
+      ? candidate.failedPatterns.filter((item): item is string => typeof item === "string")
+      : [],
+    artifacts: Array.isArray(candidate.artifacts)
+      ? candidate.artifacts.filter((item): item is string => typeof item === "string")
+      : [],
+    currentDashboardVersion:
+      typeof candidate.currentDashboardVersion === "number" &&
+      Number.isFinite(candidate.currentDashboardVersion)
+        ? candidate.currentDashboardVersion
+        : 0,
+    observability,
+    lastQueryTraceSummary: coerceTraceSummary(candidate.lastQueryTraceSummary),
+  } satisfies SessionAnalysisState;
+};
+
+const coerceObservability = (value: unknown): SessionAnalysisState["observability"] | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const numberOrZero = (key: string) => {
+    const next = candidate[key];
+    return typeof next === "number" && Number.isFinite(next) ? next : 0;
+  };
+
+  return {
+    requestCount: numberOrZero("requestCount"),
+    cacheHitCount: numberOrZero("cacheHitCount"),
+    executionCount: numberOrZero("executionCount"),
+    executionFailureCount: numberOrZero("executionFailureCount"),
+    validationRejectCount: numberOrZero("validationRejectCount"),
+    criticRejectCount: numberOrZero("criticRejectCount"),
+    fallbackCount: numberOrZero("fallbackCount"),
+    panelReplacementCount: numberOrZero("panelReplacementCount"),
+    totalRuntimeMs: numberOrZero("totalRuntimeMs"),
+  };
+};
+
+const coerceTraceSummary = (value: unknown): QueryTraceSummary | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.traceId !== "string" ||
+    typeof candidate.createdAt !== "string" ||
+    typeof candidate.finalStatus !== "string" ||
+    typeof candidate.stageCount !== "number"
+  ) {
+    return undefined;
+  }
+
+  return {
+    traceId: candidate.traceId,
+    createdAt: candidate.createdAt,
+    finalStatus:
+      candidate.finalStatus === "success" ||
+      candidate.finalStatus === "fallback" ||
+      candidate.finalStatus === "error"
+        ? candidate.finalStatus
+        : "error",
+    failedStage: typeof candidate.failedStage === "string" ? candidate.failedStage as QueryTraceSummary["failedStage"] : undefined,
+    errorCode: typeof candidate.errorCode === "string" ? candidate.errorCode as QueryTraceSummary["errorCode"] : undefined,
+    errorMessage: typeof candidate.errorMessage === "string" ? candidate.errorMessage : undefined,
+    stageCount: candidate.stageCount,
+  };
+};
+
+const coerceAnalysisMemory = (value: unknown): AnalysisMemory | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return {
+    columns: Array.isArray(candidate.columns)
+      ? (candidate.columns as AnalysisMemory["columns"])
+      : [],
+    primaryDimensions: Array.isArray(candidate.primaryDimensions)
+      ? candidate.primaryDimensions.filter((item): item is string => typeof item === "string")
+      : [],
+    primaryMeasures: Array.isArray(candidate.primaryMeasures)
+      ? candidate.primaryMeasures.filter((item): item is string => typeof item === "string")
+      : [],
+    dateCandidates: Array.isArray(candidate.dateCandidates)
+      ? candidate.dateCandidates.filter((item): item is string => typeof item === "string")
+      : [],
+    dataQualityWarnings: Array.isArray(candidate.dataQualityWarnings)
+      ? candidate.dataQualityWarnings.filter((item): item is string => typeof item === "string")
+      : [],
+    opportunities: Array.isArray(candidate.opportunities)
+      ? (candidate.opportunities as AnalysisMemory["opportunities"])
+      : [],
+  };
 };
 
 const seedSandboxScripts = async (sandbox: Sandbox) => {

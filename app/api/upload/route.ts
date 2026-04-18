@@ -42,12 +42,14 @@ export async function POST(request: Request) {
   const initial = buildInitialDashboard(parseExplorePayload(rawExplore));
   const analysisState = initializeAnalysisState({
     profile: initial.profile,
+    analysisMemory: initial.analysisMemory,
     kpis: initial.kpis,
     panels: initial.panels,
     insights: initial.insights,
   });
   const suggestedPrompts = await generateSuggestedPrompts({
     profile: initial.profile,
+    analysisMemory: initial.analysisMemory,
     insights: initial.insights,
   });
 
