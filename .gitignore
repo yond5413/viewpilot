@@ -42,3 +42,5 @@ next-env.d.ts
 .gstack/
 
 opencode.json
+mcp.json
+.vercel

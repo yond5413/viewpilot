@@ -28,7 +28,7 @@ def clean_value(value):
     if isinstance(value, float):
         return float(value)
     if isinstance(value, str):
-        return value.strip()
+        return value.strip()[:100]
     return str(value)
 
 
@@ -175,9 +175,9 @@ categorical_columns = [
 
 warnings = []
 if not datetime_columns:
-    warnings.append("No clear date axis detected, so the first pass prioritizes ranking, distribution, and data quality views.")
+    warnings.append("No reliable date axis was detected, so the first pass prioritizes ranking, distribution, and data quality views.")
 if not primary_dimensions:
-    warnings.append("No strong low-cardinality grouping dimension was detected yet.")
+    warnings.append("No strong grouping dimension was detected yet, so comparisons may stay high level.")
 if not primary_measures:
     warnings.append("No strong quantitative measure was detected for KPI or chart generation.")
 
@@ -274,6 +274,7 @@ analysis_memory = {
     "dateCandidates": datetime_columns[:3],
     "dataQualityWarnings": warnings[:4],
     "opportunities": opportunities[:6],
+    "metricHighlights": [],
 }
 
 kpis = [
@@ -305,6 +306,10 @@ if best_dimension:
     )
 
 kpis = kpis[:4]
+analysis_memory["metricHighlights"] = [
+    {"label": item["label"], "value": item["value"], "tone": item.get("tone", "neutral")}
+    for item in kpis
+]
 
 panels = []
 insights = []
@@ -348,7 +353,7 @@ if best_date and best_measure:
             }
         )
         insights.append(
-            f"A usable time axis was found in {best_date}, so the dashboard starts with a monthly trend for {best_measure}."
+            f"{best_date.replace('_', ' ').title()} supports a time-based view for {best_measure.replace('_', ' ')}."
         )
 
 if best_dimension and best_measure:
@@ -498,8 +503,15 @@ if not panels and numeric_columns:
 
 if not insights:
     insights.append(
-        "The first pass prioritized the strongest grouping dimensions and measures to seed an analyst-style dashboard." 
+        "The first pass seeded the dashboard with the strongest grouping and distribution views available in the dataset."
     )
+
+if best_measure:
+    insights.append(
+        f"{best_measure.replace('_', ' ').title()} is the primary quantitative signal driving the current dashboard views."
+    )
+
+insights = list(dict.fromkeys(insights + warnings))[:3]
 
 payload = {
     "profile": {
@@ -516,7 +528,7 @@ payload = {
     "analysisMemory": analysis_memory,
     "kpis": kpis,
     "panels": panels[:4],
-    "insights": (insights + warnings)[:4],
+    "insights": insights,
 }
 
 print("EXPLORE_JSON:" + json.dumps(payload))

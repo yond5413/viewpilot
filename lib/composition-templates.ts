@@ -28,6 +28,8 @@ export const inferCompositionPlan = (args: {
 }): CompositionPlan => {
   const normalizedPrompt = args.prompt.toLowerCase();
   const memory = args.analysisMemory;
+  const wantsTransform = /\b(convert|change|turn|switch|replace|make)\b/.test(normalizedPrompt);
+  const wantsMetrics = /\b(kpi|metric|summary|summarize|headline)\b/.test(normalizedPrompt);
 
   let template: CompositionTemplateKind = "overview";
 
@@ -62,6 +64,16 @@ export const inferCompositionPlan = (args: {
     };
   }
 
+  if (args.route.requestClass === "panel_replace") {
+    return {
+      template,
+      primaryChartFamily: chartMap[template],
+      supportPanelAllowed: false,
+      targetKpis: wantsMetrics ? 2 : 0,
+      targetPanels: 1,
+    };
+  }
+
   if (args.route.requestClass === "panel_add") {
     return {
       template,
@@ -76,7 +88,7 @@ export const inferCompositionPlan = (args: {
     template,
     primaryChartFamily: chartMap[template],
     supportPanelAllowed: template === "overview" || template === "ranking",
-    targetKpis: template === "data_quality" ? 2 : 4,
+    targetKpis: template === "data_quality" ? 2 : wantsTransform && !wantsMetrics ? 2 : 4,
     targetPanels: template === "data_quality" ? 1 : 2,
   };
 };

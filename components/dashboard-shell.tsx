@@ -8,9 +8,12 @@ import {
   ChevronRight,
   CircleDot,
   Download,
+  Eye,
   LoaderCircle,
   Mic,
   MoreHorizontal,
+  PanelRightClose,
+  PanelRightOpen,
   SendHorizonal,
   Sparkles,
   TrendingUp,
@@ -89,6 +92,16 @@ const stagger = {
 
 const EMPTY_CELL = "—";
 
+const prettifyText = (value: string) =>
+  value
+    .replace(/[_-]+/g, " ")
+    .replace(/\boutlay amount\b/gi, "Outlay")
+    .replace(/\bobligated amount\b/gi, "Obligated")
+    .replace(/\bbudget authority amount\b/gi, "Budget Authority")
+    .replace(/\bactive agency name\b/gi, "Agency Count")
+    .replace(/\s+/g, " ")
+    .trim();
+
 const formatDisplayValue = (value: unknown) => {
   if (value == null) {
     return EMPTY_CELL;
@@ -101,18 +114,66 @@ const formatDisplayValue = (value: unknown) => {
     }).format(value);
   }
 
-  const text = String(value).trim();
+  const text = prettifyText(String(value));
+  if (/^-?\d+(?:\.\d+)?%$/.test(text)) {
+    return text;
+  }
+  if (/^\$?-?\d+(?:\.\d+)?[KMBT]$/i.test(text)) {
+    return text.toUpperCase();
+  }
   return text || EMPTY_CELL;
+};
+
+const formatProgressMessage = (event: AnalysisStreamEvent) => {
+  if (event.type === "stage_started") {
+    switch (event.stage) {
+      case "session_context":
+        return "Loading the current dashboard context.";
+      case "route":
+        return "Interpreting your request and choosing the right analysis path.";
+      case "task_spec":
+        return "Planning the KPI package and chart updates.";
+      case "codegen":
+        return "Drafting the analysis steps inside the sandbox.";
+      case "sandbox_execution":
+        return "Running the analysis in the sandbox.";
+      case "sandbox_result_parse":
+        return "Parsing the sandbox result into dashboard artifacts.";
+      case "validation":
+        return "Checking KPI and chart quality.";
+      case "critic":
+        return "Reviewing the update for readability and usefulness.";
+      case "mutation":
+        return "Composing the dashboard update.";
+      case "persist":
+        return "Saving the updated dashboard state.";
+      default:
+        return event.message;
+    }
+  }
+
+  if (event.type === "stage_warning") {
+    return `Watchout: ${event.message}`;
+  }
+
+  if (event.type === "analysis_complete") {
+    return "Analysis complete. Syncing the final dashboard.";
+  }
+
+  return event.message;
 };
 
 export function DashboardShell({ sessionId }: DashboardShellProps) {
   const [snapshot, setSnapshot] = useState<DashboardState | null>(null);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+  const voiceTranscriptRef = useRef("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voiceActive, setVoiceActive] = useState(false);
   const [streamEvents, setStreamEvents] = useState<AnalysisStreamEvent[]>([]);
+  const [showDataPreview, setShowDataPreview] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -147,6 +208,9 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
     if (loading) return "Preparing dashboard…";
     return snapshot?.status || "Ready";
   }, [loading, snapshot?.status]);
+  const previewColumns = snapshot?.profile?.sampleRows[0]
+    ? Object.keys(snapshot.profile.sampleRows[0])
+    : [];
 
   useEffect(() => {
     if (!submitting) {
@@ -169,8 +233,9 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
     return () => eventSource.close();
   }, [sessionId, submitting]);
 
-  const submitQuery = async () => {
-    if (!query.trim() || submitting) return;
+  const submitQuery = async (overridePrompt?: string) => {
+    const nextPrompt = overridePrompt ?? query.trim();
+    if (!nextPrompt || submitting) return;
     setSubmitting(true);
     setError(null);
     setStreamEvents([]);
@@ -179,7 +244,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
       const response = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, prompt: query.trim() }),
+        body: JSON.stringify({ sessionId, prompt: nextPrompt }),
       });
 
       const payload = (await response.json()) as DashboardState | { error?: string };
@@ -191,7 +256,9 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
       }
 
       setSnapshot(payload as DashboardState);
-      setQuery("");
+      if (!overridePrompt) {
+        setQuery("");
+      }
     } catch (queryError) {
       setError(
         queryError instanceof Error ? queryError.message : "Unable to run the copilot query.",
@@ -216,13 +283,23 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
     recognition.interimResults = true;
     recognition.lang = "en-US";
 
-    recognition.onstart = () => setVoiceActive(true);
-    recognition.onend = () => setVoiceActive(false);
+    recognition.onstart = () => {
+      voiceTranscriptRef.current = "";
+      setVoiceActive(true);
+    };
     recognition.onresult = (event) => {
       const transcript = Array.from(event.results)
         .map((result) => result[0]?.transcript ?? "")
         .join("");
+      voiceTranscriptRef.current = transcript;
       setQuery(transcript);
+    };
+    recognition.onend = () => {
+      setVoiceActive(false);
+      const captured = voiceTranscriptRef.current.trim();
+      if (captured) {
+        void submitQuery(captured);
+      }
     };
 
     recognition.start();
@@ -256,9 +333,9 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
         <div className="dot-grid absolute inset-0" />
       </div>
 
-      <div className="relative mx-auto grid w-full max-w-[1400px] gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="relative mx-auto flex w-full max-w-[1400px] items-start gap-5">
         {/* Main column */}
-        <section className="min-w-0 space-y-5">
+        <section className="min-w-0 flex-1 space-y-5">
           {/* Header */}
           <motion.header
             initial={{ opacity: 0, y: -12 }}
@@ -296,6 +373,15 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
 
               <div className="flex flex-wrap items-center gap-2">
                 <Button
+                  onClick={() => setShowDataPreview(true)}
+                  variant="outline"
+                  size="sm"
+                  className="rounded-full border-[var(--border-strong)] bg-[var(--card)] text-xs text-[var(--foreground)] hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+                >
+                  <Eye className="h-3.5 w-3.5 text-[var(--accent)]" />
+                  View data
+                </Button>
+                <Button
                   onClick={() => void handleExport()}
                   variant="outline"
                   size="sm"
@@ -303,6 +389,22 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
                 >
                   <Download className="h-3.5 w-3.5 text-[var(--accent)]" />
                   Export PDF
+                </Button>
+                <Button
+                  onClick={() => setCopilotOpen((v) => !v)}
+                  variant="outline"
+                  size="sm"
+                  className={cn(
+                    "rounded-full border-[var(--border-strong)] bg-[var(--card)] text-xs text-[var(--foreground)] hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]",
+                    copilotOpen && "border-[var(--accent)]/60 bg-[var(--accent-soft)] text-[var(--accent)]",
+                  )}
+                >
+                  {copilotOpen ? (
+                    <PanelRightClose className="h-3.5 w-3.5" />
+                  ) : (
+                    <PanelRightOpen className="h-3.5 w-3.5" />
+                  )}
+                  Copilot
                 </Button>
               </div>
             </div>
@@ -371,7 +473,13 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
                 ))
               : snapshot?.panels.map((panel) => (
                   <motion.div key={panel.id} variants={stagger.item}>
-                    <PanelCard panel={panel} />
+                    <PanelCard
+                      panel={panel}
+                      onQuickAction={(prompt) => {
+                        setQuery(prompt);
+                        void submitQuery(prompt);
+                      }}
+                    />
                   </motion.div>
                 ))}
           </motion.section>
@@ -390,7 +498,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
                     Insight rail
                   </p>
                   <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                    Proactive notes generated from the first pass through the data.
+                    The strongest analyst notes and next-step opportunities from the current dataset.
                   </p>
                 </div>
                 <Badge
@@ -409,7 +517,7 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
                 animate="show"
                 className="mt-5 grid gap-3 lg:grid-cols-3"
               >
-                {(snapshot?.insights ?? []).map((insight) => (
+                {(snapshot?.insights ?? []).slice(0, 3).map((insight) => (
                   <motion.div
                     key={insight}
                     variants={stagger.item}
@@ -429,6 +537,20 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
                 ))}
               </motion.div>
             </motion.section>
+          ) : !loading ? (
+            <motion.section
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.5, duration: 0.4 }}
+              className="glass-card rounded-[24px] p-5 sm:p-6"
+            >
+              <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-muted)]">
+                Insight rail
+              </p>
+              <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+                This dataset needs a more specific prompt before the system can surface stronger insights. Try asking for a ranking, a distribution view, or a data-quality check.
+              </p>
+            </motion.section>
           ) : null}
 
           <AnimatePresence>
@@ -446,20 +568,117 @@ export function DashboardShell({ sessionId }: DashboardShellProps) {
         </section>
 
         {/* Copilot sidebar */}
-        <aside className="lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)]">
-          <CopilotPanel
-            snapshot={snapshot}
-            loading={loading}
-            query={query}
-            setQuery={setQuery}
-            submitting={submitting}
-            streamEvents={streamEvents}
-            submitQuery={submitQuery}
-            voiceActive={voiceActive}
-            startVoiceCapture={startVoiceCapture}
-          />
-        </aside>
+        <AnimatePresence initial={false}>
+          {copilotOpen ? (
+            <motion.aside
+              key="copilot-panel"
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 380, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ duration: 0.28, ease: [0.4, 0, 0.2, 1] }}
+              className="hidden shrink-0 overflow-hidden lg:flex lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:flex-col"
+            >
+              <div className="flex h-full min-h-0 w-[380px] flex-col">
+                <CopilotPanel
+                  snapshot={snapshot}
+                  loading={loading}
+                  query={query}
+                  setQuery={setQuery}
+                  submitting={submitting}
+                  streamEvents={streamEvents}
+                  submitQuery={submitQuery}
+                  voiceActive={voiceActive}
+                  startVoiceCapture={startVoiceCapture}
+                />
+              </div>
+            </motion.aside>
+          ) : null}
+        </AnimatePresence>
       </div>
+
+      <AnimatePresence>
+        {showDataPreview && snapshot?.profile ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+            onClick={() => setShowDataPreview(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 16, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 16, scale: 0.98 }}
+              transition={{ duration: 0.2 }}
+              className="glass-card max-h-[85vh] w-full max-w-5xl overflow-hidden rounded-[28px] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))]"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-4 border-b border-[var(--border)] px-5 py-4">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-[0.22em] text-[var(--text-muted)]">
+                    Data preview
+                  </p>
+                  <h2 className="mt-1 text-lg font-semibold text-[var(--foreground)]">
+                    {snapshot.profile.filename}
+                  </h2>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    {snapshot.profile.rows.toLocaleString()} rows, {snapshot.profile.columns} columns. Read-only sample of the uploaded data.
+                  </p>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => setShowDataPreview(false)}>
+                  Close
+                </Button>
+              </div>
+              <div className="grid gap-4 border-b border-[var(--border)] px-5 py-4 md:grid-cols-[260px_minmax(0,1fr)]">
+                <div className="space-y-3">
+                    <div className="rounded-2xl border border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-4">
+                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                      Column overview
+                    </p>
+                    <div className="mt-3 space-y-2">
+                      {snapshot.profile.columnsByType.slice(0, 8).map((column) => (
+                        <div key={column.name} className="flex items-center justify-between gap-3 text-sm">
+                          <span className="truncate text-[var(--foreground)]">{formatDisplayValue(column.name)}</span>
+                          <span className="shrink-0 text-[var(--text-muted)]">{column.inferredType}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-4">
+                  <p className="text-xs font-medium uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                    Sample rows
+                  </p>
+                  <ScrollArea className="mt-3 max-h-[50vh] w-full">
+                    <table className="min-w-full text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-[var(--border)] text-[var(--text-muted)]">
+                          {previewColumns.map((column) => (
+                            <th key={column} className="px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em]">
+                              {formatDisplayValue(column)}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {snapshot.profile.sampleRows.map((row, index) => (
+                          <tr key={index} className="border-b border-[var(--border)] last:border-none">
+                            {previewColumns.map((column) => (
+                              <td key={column} className="px-3 py-2 text-[var(--foreground)]">
+                                {formatDisplayValue(row[column])}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </ScrollArea>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </main>
   );
 }
@@ -487,13 +706,13 @@ function KpiCard({
   return (
     <motion.div
       whileHover={{ y: -2, transition: { type: "spring", stiffness: 400 } }}
-      className="glass-panel rounded-[20px] p-4 sm:p-5"
+      className="glass-panel h-[118px] rounded-[20px] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015))] p-4 sm:p-5"
     >
-      <p className="text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]">
+      <p className="line-clamp-2 min-h-[2.4rem] text-xs font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]">
         {label}
       </p>
       <div className="mt-3 flex items-end justify-between gap-3">
-        <p className="min-w-0 flex-1 break-words text-[clamp(1.85rem,2.6vw,2.75rem)] font-semibold leading-none tracking-tight text-[var(--foreground)]">
+        <p className="min-w-0 flex-1 truncate text-[clamp(1.7rem,2.2vw,2.4rem)] font-semibold leading-none tracking-tight text-[var(--foreground)]">
           {formatDisplayValue(value)}
         </p>
         {delta ? (
@@ -528,18 +747,24 @@ function PanelSkeleton() {
   );
 }
 
-function PanelCard({ panel }: { panel: DashboardPanel }) {
+function PanelCard({
+  panel,
+  onQuickAction,
+}: {
+  panel: DashboardPanel;
+  onQuickAction: (prompt: string) => void;
+}) {
   return (
     <motion.div
       whileHover={{ y: -2, transition: { type: "spring", stiffness: 400 } }}
-      className="glass-card rounded-[24px]"
+      className="glass-card rounded-[24px] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))]"
     >
       <div className="flex flex-row items-start justify-between gap-3 p-4 sm:p-5">
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           <CardTitle className="text-base font-semibold text-[var(--foreground)]">
             {panel.title}
           </CardTitle>
-          <CardDescription className="text-sm leading-6 text-[var(--text-secondary)]">
+          <CardDescription className="line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">
             {panel.description}
           </CardDescription>
         </div>
@@ -553,21 +778,38 @@ function PanelCard({ panel }: { panel: DashboardPanel }) {
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            className="border-[var(--border)] bg-[var(--popover)] text-[var(--foreground)]"
-          >
-            <DropdownMenuItem>Ask about this</DropdownMenuItem>
-            <DropdownMenuItem>Regenerate</DropdownMenuItem>
-            <DropdownMenuSeparator className="bg-[var(--border)]" />
-            <DropdownMenuItem className="text-[var(--danger)] focus:text-[var(--danger)]">
-              Remove
+            <DropdownMenuContent
+              align="end"
+              className="border-[var(--border)] bg-[var(--popover)] text-[var(--foreground)]"
+            >
+              <DropdownMenuItem onClick={() => onQuickAction(`Explain the panel titled "${panel.title}" and tell me what matters most.`)}>
+                Ask about this
+              </DropdownMenuItem>
+              {panel.kind === "plotly" ? (
+                <>
+                  <DropdownMenuItem onClick={() => onQuickAction(`Convert the panel titled "${panel.title}" to a bar chart.`)}>
+                    Convert to bar
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onQuickAction(`Convert the panel titled "${panel.title}" to a pie chart if that would be a truthful composition view.`)}>
+                    Convert to pie
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onQuickAction(`Convert the panel titled "${panel.title}" to a table.`)}>
+                    Convert to table
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+              <DropdownMenuItem onClick={() => onQuickAction(`Replace the panel titled "${panel.title}" with a stronger view that better answers the current dashboard question.`)}>
+                Replace panel
+              </DropdownMenuItem>
+              <DropdownMenuSeparator className="bg-[var(--border)]" />
+              <DropdownMenuItem className="text-[var(--danger)] focus:text-[var(--danger)]">
+                Remove
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
 
-      <div className="mx-4 mb-4 rounded-[18px] border border-[var(--border)] bg-[var(--surface)] p-3">
+      <div className="mx-4 mb-4 rounded-[18px] border border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
         {panel.kind === "plotly" ? (
           <Plot
             data={panel.spec.data}
@@ -658,7 +900,7 @@ function CopilotPanel({
   setQuery: (value: string) => void;
   submitting: boolean;
   streamEvents: AnalysisStreamEvent[];
-  submitQuery: () => Promise<void>;
+  submitQuery: (overridePrompt?: string) => Promise<void>;
   voiceActive: boolean;
   startVoiceCapture: () => void;
 }) {
@@ -675,7 +917,7 @@ function CopilotPanel({
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ duration: 0.5, ease: "easeOut", delay: 0.2 }}
-      className="glass-panel flex h-full flex-col rounded-[28px]"
+      className="glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(255,255,255,0.02))]"
     >
       {/* Header */}
       <div className="space-y-3 p-4 sm:p-5">
@@ -702,37 +944,37 @@ function CopilotPanel({
         <div className="border-t border-[var(--border)]" />
       </div>
 
-      {/* Status bubble */}
-      <div className="px-4 sm:px-5">
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--accent-soft)] p-3">
-          <p className="text-xs text-[var(--text-secondary)]">
-            {loading
-              ? "Loading the latest session snapshot."
-              : submitting && streamEvents.length > 0
-                ? streamEvents.at(-1)?.message
-                : submitting
-                  ? "Working through the analysis plan and validating results."
-                  : snapshot?.messages.at(-1)?.content ?? "Ready for your next prompt."}
-          </p>
-          <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-[var(--accent)]">
-            <div
-              className={cn(
-                "h-1.5 w-1.5 rounded-full bg-[var(--accent)]",
-                loading && "animate-pulse",
-              )}
-            />
-            {loading
-              ? "Syncing dashboard"
-              : submitting
-                ? streamEvents.at(-1)?.stage?.replace(/_/g, " ") || "Running analysis"
-                : "Ready for prompts"}
-          </div>
-        </div>
-      </div>
-
       {/* Message list */}
-      <div ref={scrollRef} className="mt-4 min-h-0 flex-1 overflow-y-auto px-4 pb-2 sm:px-5">
-        <div className="space-y-3">
+      <div ref={scrollRef} className="mt-2 min-h-0 flex-1 overflow-y-auto px-4 pb-2 sm:px-5">
+        {!loading && (snapshot?.messages ?? []).length === 0 && !submitting ? (
+          <div className="flex h-full flex-col items-center justify-center gap-5 py-10 text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[var(--accent-soft)]">
+              <Sparkles className="h-5 w-5 text-[var(--accent)]" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-[var(--foreground)]">Ask anything about your data</p>
+              <p className="mt-1 text-xs text-[var(--text-muted)]">
+                {snapshot?.profile
+                  ? `${snapshot.profile.rows.toLocaleString()} rows · ${snapshot.profile.columns} columns loaded`
+                  : "Upload a CSV to get started"}
+              </p>
+            </div>
+            {(snapshot?.suggestedPrompts?.length ?? 0) > 0 ? (
+              <div className="grid w-full gap-2">
+                {snapshot?.suggestedPrompts.slice(0, 3).map((prompt) => (
+                  <button
+                    key={prompt}
+                    onClick={() => void submitQuery(prompt)}
+                    className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-left text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/60 hover:bg-[var(--accent-soft)] hover:text-[var(--foreground)]"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+        <div className="space-y-4">
           <AnimatePresence initial={false}>
             {(snapshot?.messages ?? []).map((message) => (
               <motion.div
@@ -755,11 +997,71 @@ function CopilotPanel({
             ) : null}
           </AnimatePresence>
         </div>
+        )}
+        {snapshot?.analysisState.pendingClarification ? (
+          <div className="mt-4 space-y-2">
+            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-muted)]">
+              Clarify intent
+            </p>
+            <div className="grid gap-2">
+              {snapshot.analysisState.pendingClarification.options.map((option) => {
+                const recommended = option.id === snapshot.analysisState.pendingClarification?.recommendedOptionId;
+                return (
+                  <button
+                    key={option.id}
+                    onClick={() => void submitQuery(option.id)}
+                    className={cn(
+                      "rounded-xl border px-3 py-2 text-left transition",
+                      recommended
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                        : "border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)]/70",
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-medium text-[var(--foreground)]">
+                        {option.id}) {option.label}
+                      </p>
+                      {recommended ? (
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--accent)]">
+                          Recommended
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
+                      {option.description}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* Input */}
-      <div className="mt-2 p-4 sm:p-5">
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-1">
+      <div className="p-4 sm:p-5">
+        {/* Follow-up chips — only after first message */}
+        {!submitting && !snapshot?.analysisState.pendingClarification && (snapshot?.messages?.length ?? 0) > 0 && (snapshot?.suggestedPrompts?.length ?? 0) > 0 ? (
+          <div className="mb-3 flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+            {snapshot?.suggestedPrompts.slice(0, 4).map((prompt) => (
+              <button
+                key={prompt}
+                onClick={() => void submitQuery(prompt)}
+                className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-[11px] text-[var(--text-secondary)] transition hover:border-[var(--accent)]/60 hover:bg-[var(--accent-soft)] hover:text-[var(--foreground)]"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Command bar */}
+        <div className={cn(
+          "rounded-2xl border bg-[var(--surface)] transition-colors",
+          voiceActive
+            ? "border-[var(--accent)]/60 ring-2 ring-[var(--accent)]/15"
+            : "border-[var(--border-strong)] focus-within:border-[var(--accent)]/60 focus-within:ring-2 focus-within:ring-[var(--accent)]/10",
+        )}>
           <textarea
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -768,44 +1070,44 @@ function CopilotPanel({
                 void submitQuery();
               }
             }}
-            placeholder="Compare Q1 vs Q2, find the strongest segment…"
-            className="min-h-20 w-full resize-none rounded-xl bg-transparent px-3 py-2.5 text-sm text-[var(--foreground)] outline-none placeholder:text-[var(--text-muted)]"
+            placeholder={voiceActive ? "Listening…" : "Ask about your data — trends, outliers, segments…"}
+            rows={2}
+            className="w-full resize-none bg-transparent px-4 pt-3 text-sm text-[var(--foreground)] outline-none placeholder:text-[var(--text-muted)]"
           />
-          <div className="flex items-center gap-2 px-2 pb-2">
-            <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
-              <Button
-                onClick={startVoiceCapture}
-                type="button"
-                variant="ghost"
-                size="sm"
-                className={cn(
-                  "rounded-full text-xs",
-                  voiceActive
-                    ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                    : "text-[var(--text-muted)] hover:bg-[var(--card)] hover:text-[var(--foreground)]",
-                )}
-              >
-                <Mic className="h-3.5 w-3.5" />
-                {voiceActive ? "Listening…" : "Voice"}
-              </Button>
-            </motion.div>
+          <div className="flex items-center gap-1.5 px-3 pb-2.5 pt-1">
+            <button
+              onClick={startVoiceCapture}
+              disabled={submitting}
+              className={cn(
+                "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-40",
+                voiceActive
+                  ? "bg-[var(--accent)] text-white"
+                  : "text-[var(--text-muted)] hover:bg-[var(--card)] hover:text-[var(--foreground)]",
+              )}
+            >
+              <Mic className="h-3 w-3" />
+              {voiceActive ? "Listening" : "Voice"}
+            </button>
             <div className="flex-1" />
-            <p className="text-xs text-[var(--text-muted)]">⌘↵ to send</p>
-            <motion.div whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}>
-              <Button
-                onClick={() => void submitQuery()}
-                disabled={!query.trim() || submitting}
-                size="sm"
-                className="rounded-full bg-[var(--accent)] text-xs text-white hover:bg-indigo-500 disabled:opacity-40"
-              >
-                {submitting ? (
-                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <SendHorizonal className="h-3.5 w-3.5" />
-                )}
-                Send
-              </Button>
-            </motion.div>
+            <span className="text-[10px] text-[var(--text-muted)] opacity-60">⌘↵</span>
+            <motion.button
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={() => void submitQuery()}
+              disabled={(!query.trim() && !voiceActive) || submitting}
+              className={cn(
+                "flex h-7 w-7 items-center justify-center rounded-full transition disabled:opacity-30",
+                query.trim() || voiceActive
+                  ? "bg-[var(--accent)] text-white hover:bg-indigo-500"
+                  : "bg-[var(--border)] text-[var(--text-muted)]",
+              )}
+            >
+              {submitting ? (
+                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <SendHorizonal className="h-3.5 w-3.5" />
+              )}
+            </motion.button>
           </div>
         </div>
       </div>
@@ -813,56 +1115,148 @@ function CopilotPanel({
   );
 }
 
+const CONTENT_TRUNCATE_CHARS = 320;
+
 function MessageBubble({ message }: { message: DashboardState["messages"][number] }) {
+  const [bodyExpanded, setBodyExpanded] = useState(false);
+  const [codeExpanded, setCodeExpanded] = useState(false);
+
   if (message.role === "user") {
     return (
-      <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-sm bg-[var(--accent)] px-4 py-2.5 text-sm leading-6 text-white">
-        {message.content}
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-2xl rounded-br-[4px] bg-[var(--accent)] px-4 py-2.5 text-sm leading-[1.65] text-white shadow-sm">
+          {message.content}
+        </div>
       </div>
     );
   }
 
+  const content = message.content ?? "";
+  const isTruncatable = content.length > CONTENT_TRUNCATE_CHARS;
+  const visibleContent = isTruncatable && !bodyExpanded
+    ? content.slice(0, CONTENT_TRUNCATE_CHARS).trimEnd() + "…"
+    : content;
+
+  const lineCount = message.code ? message.code.split("\n").length : 0;
+
   return (
-    <div className="glass-card space-y-3 rounded-2xl rounded-bl-sm px-4 py-3">
-      <div className="flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
-        <Bot className="h-3.5 w-3.5 text-[var(--accent)]" />
-        {message.role === "assistant" ? "Assistant" : "System"}
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[var(--accent-soft)]">
+          <Sparkles className="h-3 w-3 text-[var(--accent)]" />
+        </div>
+        <span className="text-[11px] font-semibold text-[var(--accent)]">Viewpilot</span>
+        {message.createdAt ? (
+          <span className="text-[10px] text-[var(--text-muted)]">
+            {new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        ) : null}
       </div>
-      <p className="text-sm leading-6 text-[var(--foreground)]">{message.content}</p>
-      {message.code ? (
-        <pre className="overflow-x-auto rounded-xl bg-[#0d0d0e] p-4 text-xs leading-6 text-[#c4c4c8]">
-          <code>{message.code}</code>
-        </pre>
-      ) : null}
+      <div className="rounded-2xl rounded-tl-[4px] border border-[var(--border)] bg-[var(--card)] px-4 py-3">
+        <p className="whitespace-pre-wrap text-sm leading-[1.7] text-[var(--foreground)]">
+          {visibleContent}
+        </p>
+        {isTruncatable ? (
+          <button
+            onClick={() => setBodyExpanded((v) => !v)}
+            className="mt-2 text-xs font-medium text-[var(--accent)] hover:underline"
+          >
+            {bodyExpanded ? "Show less" : "Show more"}
+          </button>
+        ) : null}
+        {message.code ? (
+          <div className="mt-3">
+            <button
+              onClick={() => setCodeExpanded((v) => !v)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)] transition hover:border-[var(--accent)]/50 hover:text-[var(--accent)]"
+            >
+              <ChevronRight className={cn("h-3 w-3 transition-transform", codeExpanded && "rotate-90")} />
+              Python · {lineCount} line{lineCount !== 1 ? "s" : ""}
+            </button>
+            {codeExpanded ? (
+              <pre className="mt-2 overflow-x-auto rounded-xl bg-[#0d0d0e] p-4 text-xs leading-6 text-[#c4c4c8]">
+                <code>{message.code}</code>
+              </pre>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
 
+const PIPELINE_STEPS: { key: string; label: string; stages: string[] }[] = [
+  { key: "route", label: "Route", stages: ["session_context", "route"] },
+  { key: "plan", label: "Plan", stages: ["task_spec"] },
+  { key: "code", label: "Code", stages: ["codegen"] },
+  { key: "run", label: "Run", stages: ["sandbox_execution", "sandbox_result_parse"] },
+  { key: "review", label: "Review", stages: ["validation", "critic", "mutation", "persist"] },
+];
+
 function StreamingPulse({ events }: { events: AnalysisStreamEvent[] }) {
+  const latestEvent = events.at(-1);
+  const activeStepIndex = latestEvent?.stage
+    ? PIPELINE_STEPS.findIndex((step) => step.stages.includes(latestEvent.stage ?? ""))
+    : -1;
+  const message = latestEvent ? formatProgressMessage(latestEvent) : "Preparing your analysis…";
+
   return (
-    <div className="glass-card rounded-2xl rounded-bl-sm px-4 py-3">
-      <div className="mb-3 flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
-        <Bot className="h-3.5 w-3.5 text-[var(--accent)]" />
-        Streaming
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="flex h-5 w-5 items-center justify-center rounded-md bg-[var(--accent-soft)]">
+          <LoaderCircle className="h-3 w-3 animate-spin text-[var(--accent)]" />
+        </div>
+        <span className="text-[11px] font-semibold text-[var(--accent)]">Viewpilot</span>
+        <span className="text-[10px] text-[var(--text-muted)]">working…</span>
       </div>
-      {events.length > 0 ? (
-        <div className="space-y-2">
-          {events.slice(-4).map((event) => (
-            <div key={event.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-              <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-muted)]">
-                {(event.stage || "progress").replace(/_/g, " ")}
-              </p>
-              <p className="mt-1 text-sm leading-6 text-[var(--foreground)]">{event.message}</p>
-            </div>
-          ))}
+
+      <div className="rounded-2xl rounded-tl-[4px] border border-[var(--accent)]/20 bg-[var(--card)] px-4 py-3">
+        {/* Pipeline */}
+        <div className="mb-3 flex items-center gap-1">
+          {PIPELINE_STEPS.map((step, i) => {
+            const done = activeStepIndex > i;
+            const active = activeStepIndex === i;
+            return (
+              <div key={step.key} className="flex items-center gap-1">
+                <div className="flex flex-col items-center gap-1">
+                  <div
+                    className={cn(
+                      "h-1.5 w-1.5 rounded-full transition-all duration-300",
+                      done
+                        ? "bg-[var(--accent)]"
+                        : active
+                          ? "animate-pulse bg-[var(--accent)] ring-2 ring-[var(--accent)]/25"
+                          : "bg-[var(--border-strong)]",
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "text-[9px] font-medium uppercase tracking-[0.08em]",
+                      done || active ? "text-[var(--accent)]" : "text-[var(--text-muted)]",
+                    )}
+                  >
+                    {step.label}
+                  </span>
+                </div>
+                {i < PIPELINE_STEPS.length - 1 ? (
+                  <div
+                    className={cn(
+                      "mb-3.5 h-px w-5 transition-all duration-500",
+                      done ? "bg-[var(--accent)]" : "bg-[var(--border)]",
+                    )}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
         </div>
-      ) : (
-        <div className="space-y-2">
-          {[75, 60, 45].map((w) => (
-            <div key={w} className="skeleton h-2.5 rounded-full" style={{ width: `${w}%` }} />
-          ))}
-        </div>
-      )}
+
+        {/* Current message */}
+        <p className="text-sm leading-[1.7] text-[var(--text-secondary)]">
+          {message}
+          <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[1px] animate-pulse rounded-full bg-[var(--accent)] align-middle" />
+        </p>
+      </div>
     </div>
   );
 }

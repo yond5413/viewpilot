@@ -34,6 +34,16 @@ export type AnalysisOpportunityKind =
   | "data_quality"
   | "composition";
 
+export type RecommendationIntent =
+  | "ranking"
+  | "comparison"
+  | "distribution"
+  | "composition"
+  | "trend"
+  | "correlation"
+  | "table"
+  | "data_quality";
+
 export type CompositionTemplateKind =
   | "overview"
   | "ranking"
@@ -152,6 +162,38 @@ export type AnalysisStreamEvent = {
   payload?: Record<string, string | number | boolean | null>;
 };
 
+export type PanelTarget = {
+  index?: number;
+  title?: string;
+  matchType: "ordinal" | "title" | "implicit";
+  confidence: number;
+};
+
+export type ConfidenceBreakdown = {
+  intentConfidence: number;
+  dataConfidence: number;
+  outputConfidence: number;
+  finalConfidence: number;
+  reasons: string[];
+};
+
+export type ClarificationOption = {
+  id: string;
+  label: string;
+  description: string;
+  resolvedPrompt: string;
+};
+
+export type PendingClarification = {
+  id: string;
+  traceId?: string;
+  originalPrompt: string;
+  reason: string;
+  options: ClarificationOption[];
+  recommendedOptionId?: string;
+  createdAt: string;
+};
+
 export type TaskKind =
   | "metric"
   | "table"
@@ -192,6 +234,10 @@ export type PanelProvenance = {
   routeClass?: RequestClass;
   mutationType?: DashboardMutationType;
   artifactPaths?: string[];
+  recommendationId?: string;
+  sourceFields?: string[];
+  localTransformableTo?: ChartFamily[];
+  transformSummary?: string;
 };
 
 export type ChartPanel = {
@@ -290,6 +336,28 @@ export type AnalysisOpportunity = {
   dateColumn?: string;
 };
 
+export type ChartRecommendation = {
+  id: string;
+  intent: RecommendationIntent;
+  mark: ChartFamily;
+  score: number;
+  reasons: string[];
+  warnings: string[];
+  requiresSandbox: boolean;
+  fields: {
+    dimension?: string;
+    measure?: string;
+    dateColumn?: string;
+    compareMeasures?: string[];
+  };
+  transform: {
+    aggregate?: "sum" | "mean" | "count";
+    topN?: number;
+    sort?: "asc" | "desc";
+    binning?: boolean;
+  };
+};
+
 export type AnalysisMemory = {
   columns: ColumnAnalysisMemory[];
   primaryDimensions: string[];
@@ -297,6 +365,12 @@ export type AnalysisMemory = {
   dateCandidates: string[];
   dataQualityWarnings: string[];
   opportunities: AnalysisOpportunity[];
+  recommendations?: ChartRecommendation[];
+  metricHighlights?: Array<{
+    label: string;
+    value: string;
+    tone?: "neutral" | "positive" | "warning";
+  }>;
 };
 
 export type AgentMessage = {
@@ -345,6 +419,8 @@ export type TaskSpec = {
   };
   routeClass: RequestClass;
   scope: AnalysisScope;
+  targetPanel?: PanelTarget;
+  selectedRecommendationId?: string;
   composition: {
     template: CompositionTemplateKind;
     primaryChartFamily?: ChartFamily;
@@ -408,6 +484,7 @@ export type DashboardMutation = {
   panels: DashboardPanel[];
   insights: string[];
   preservedExisting: boolean;
+  pendingClarification?: PendingClarification;
 };
 
 export type TaskHistoryEntry = {
@@ -424,6 +501,8 @@ export type TaskHistoryEntry = {
   validationResult?: ValidationResult;
   criticDecision?: CriticDecision;
   fallbackDecision?: FallbackDecision;
+  confidence?: ConfidenceBreakdown;
+  clarificationTriggered?: boolean;
   finalMutationType: DashboardMutationType;
   cacheKey?: string;
   artifactPaths: string[];
@@ -455,6 +534,7 @@ export type SessionAnalysisState = {
   currentDashboardVersion: number;
   observability: SessionObservability;
   lastQueryTraceSummary?: QueryTraceSummary;
+  pendingClarification?: PendingClarification;
 };
 
 export type DashboardState = {

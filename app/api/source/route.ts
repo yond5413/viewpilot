@@ -88,6 +88,7 @@ export async function POST(request: Request) {
   const suggestedPrompts = await generateSuggestedPrompts({
     profile: initial.profile,
     analysisMemory: initial.analysisMemory,
+    existingPanels: initial.panels,
     insights: initial.insights,
   });
 

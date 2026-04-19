@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { buildRecommendationsFromMemory, selectRecommendationForPrompt } from "@/lib/chart-recommendation";
 import { inferCompositionPlan } from "@/lib/composition-templates";
 import { env, hasLLM } from "@/lib/env";
 import type {
@@ -9,6 +10,7 @@ import type {
   DashboardPanel,
   DatasetProfile,
   KPI,
+  PanelTarget,
   TaskSpec,
 } from "@/lib/types";
 import { makeId } from "@/lib/utils";
@@ -100,11 +102,139 @@ const callJsonModel = async <T>(
   }
 };
 
-const heuristicRoute = (prompt: string): AnalysisRoute => {
+const ordinalIndexMap: Record<string, number> = {
+  first: 0,
+  second: 1,
+  third: 2,
+  fourth: 3,
+  fifth: 4,
+};
+
+const normalizeText = (value: string) =>
+  value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+const tokenizeText = (value: string) =>
+  normalizeText(value)
+    .split(" ")
+    .filter((token) => token.length > 2 && !["chart", "panel", "graph", "plot", "table"].includes(token));
+
+const extractPanelTarget = (
+  prompt: string,
+  existingPanels: DashboardPanel[] = [],
+): PanelTarget | undefined => {
+  const normalizedPrompt = normalizeText(prompt);
+  const promptTokens = tokenizeText(prompt);
+
+  if (/\b(histogram|box plot|boxplot|pie chart|donut|bar chart|table)\b/.test(normalizedPrompt)) {
+    const transformCandidates = existingPanels
+      .map((panel, index) => {
+        const panelTokens = new Set(tokenizeText(`${panel.title} ${panel.description}`));
+        const overlap = promptTokens.filter((token) => panelTokens.has(token));
+        const traceType =
+          panel.kind === "plotly" && panel.spec.data[0] && typeof panel.spec.data[0].type === "string"
+            ? panel.spec.data[0].type.toLowerCase()
+            : "";
+        const score =
+          overlap.length +
+          (normalizedPrompt.includes("histogram") && traceType === "histogram" ? 2 : 0) +
+          ((normalizedPrompt.includes("box plot") || normalizedPrompt.includes("boxplot")) && traceType === "histogram" ? 2 : 0) +
+          ((normalizedPrompt.includes("pie chart") || normalizedPrompt.includes("donut")) && traceType === "bar" ? 2 : 0);
+        return { panel, index, score };
+      })
+      .filter((item) => item.score >= 2)
+      .sort((a, b) => b.score - a.score);
+
+    if (transformCandidates[0]) {
+      return {
+        index: transformCandidates[0].index,
+        title: transformCandidates[0].panel.title,
+        matchType: "title",
+        confidence: Math.min(0.94, 0.62 + transformCandidates[0].score * 0.06),
+      };
+    }
+  }
+
+  const ordinalMatch = normalizedPrompt.match(/\b(first|second|third|fourth|fifth)\s+(chart|panel|graph|table)\b/);
+  if (ordinalMatch) {
+    const index = ordinalIndexMap[ordinalMatch[1]];
+    if (index != null && existingPanels[index]) {
+      return {
+        index,
+        title: existingPanels[index].title,
+        matchType: "ordinal",
+        confidence: 0.92,
+      };
+    }
+  }
+
+  const titleMatch = existingPanels.find((panel) => {
+    const normalizedTitle = normalizeText(panel.title);
+    return normalizedTitle.length > 3 && normalizedPrompt.includes(normalizedTitle);
+  });
+
+  if (titleMatch) {
+    return {
+      index: existingPanels.findIndex((panel) => panel.id === titleMatch.id),
+      title: titleMatch.title,
+      matchType: "title",
+      confidence: 0.88,
+    };
+  }
+
+  if (/\b(this|that|current)\s+(chart|panel|graph|table)\b/.test(normalizedPrompt) && existingPanels[0]) {
+    return {
+      index: 0,
+      title: existingPanels[0].title,
+      matchType: "implicit",
+      confidence: 0.58,
+    };
+  }
+
+  const fuzzyMatches = existingPanels
+    .map((panel, index) => {
+      const panelTokens = new Set(tokenizeText(`${panel.title} ${panel.description}`));
+      const overlap = promptTokens.filter((token) => panelTokens.has(token));
+      return {
+        panel,
+        index,
+        overlap,
+      };
+    })
+    .filter((match) => match.overlap.length >= 2)
+    .sort((a, b) => b.overlap.length - a.overlap.length);
+
+  if (fuzzyMatches[0]) {
+    return {
+      index: fuzzyMatches[0].index,
+      title: fuzzyMatches[0].panel.title,
+      matchType: "title",
+      confidence: Math.min(0.88, 0.58 + fuzzyMatches[0].overlap.length * 0.08),
+    };
+  }
+
+  return undefined;
+};
+
+const heuristicRoute = (prompt: string, existingPanels: DashboardPanel[] = []): AnalysisRoute => {
   const normalizedPrompt = prompt.toLowerCase();
   const wantsMetrics = /\bkpi|metric|headline|summary|summarize\b/.test(normalizedPrompt);
   const wantsChart = /\bchart|plot|graph|trend|scatter|bar\b/.test(normalizedPrompt);
   const wantsTable = /\btable|top\b/.test(normalizedPrompt);
+  const wantsTransform = /\b(convert|change|turn|switch|replace|make)\b/.test(normalizedPrompt);
+  const panelTarget = extractPanelTarget(prompt, existingPanels);
+
+  if (wantsTransform && panelTarget) {
+    return {
+      id: makeId("route"),
+      requestClass: panelTarget.confidence >= 0.75 ? "panel_replace" : "dashboard_refresh",
+      scope: "incremental_execution",
+      confidence: panelTarget.confidence,
+      urgency: "medium",
+      allowedFallbackDepth: 5,
+      shouldMutateDashboard: true,
+      summary: `Transform the targeted panel ${panelTarget.title ? `(${panelTarget.title})` : "in place"}.`,
+    };
+  }
 
   if (/\bdebug|diagnostic|why did|what happened|error\b/.test(normalizedPrompt)) {
     return {
@@ -201,8 +331,12 @@ const pickOpportunity = (
   kind: AnalysisOpportunity["kind"],
 ) => memory?.opportunities.find((item) => item.kind === kind);
 
-const inferHeuristicRoute = (prompt: string, memory?: AnalysisMemory) => {
-  const fallback = heuristicRoute(prompt);
+const inferHeuristicRoute = (
+  prompt: string,
+  memory?: AnalysisMemory,
+  existingPanels: DashboardPanel[] = [],
+) => {
+  const fallback = heuristicRoute(prompt, existingPanels);
   const normalizedPrompt = prompt.toLowerCase();
   const wantsDistribution = /\bdistribution|spread|histogram|variance|quartile|box\b/.test(
     normalizedPrompt,
@@ -245,8 +379,30 @@ const inferHeuristicRoute = (prompt: string, memory?: AnalysisMemory) => {
   return fallback;
 };
 
-const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
+const heuristicTaskSpec = (
+  route: AnalysisRoute,
+  prompt: string,
+  analysisMemory?: AnalysisMemory,
+): TaskSpec => {
+  const selectedRecommendation = selectRecommendationForPrompt({
+    prompt,
+    memory: analysisMemory
+      ? {
+          ...analysisMemory,
+          recommendations:
+            analysisMemory.recommendations?.length
+              ? analysisMemory.recommendations
+              : buildRecommendationsFromMemory(analysisMemory),
+        }
+      : undefined,
+  });
   const composition = inferCompositionPlan({ route, prompt });
+  const inferredResponseType =
+    selectedRecommendation?.mark === "table"
+      ? "table"
+      : selectedRecommendation?.mark
+        ? "chart"
+        : undefined;
   const responseType =
     route.requestClass === "dashboard_refresh"
       ? "dashboard"
@@ -255,7 +411,7 @@ const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
         : route.requestClass === "panel_add"
           ? "chart"
           : route.requestClass === "panel_replace"
-            ? "table"
+            ? inferredResponseType ?? "chart"
             : "text";
 
   return {
@@ -276,7 +432,9 @@ const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
           : route.requestClass === "panel_add"
             ? "Generated chart"
             : route.requestClass === "panel_replace"
-              ? "Generated table"
+              ? inferredResponseType === "table"
+                ? "Generated table"
+                : "Transformed chart"
               : "Narrative answer",
     userPrompt: prompt,
     businessQuestion: prompt,
@@ -315,6 +473,7 @@ const heuristicTaskSpec = (route: AnalysisRoute, prompt: string): TaskSpec => {
     },
     routeClass: route.requestClass,
     scope: route.scope,
+    selectedRecommendationId: selectedRecommendation?.id,
     composition,
     successCriteria: [
       "Answer the user request directly",
@@ -350,62 +509,74 @@ export const buildInitialDashboard = (payload: {
   insights: string[];
 }) => payload;
 
-const fallbackSuggestedPrompts = (profile: DatasetProfile, analysisMemory?: AnalysisMemory) => {
-  const prompts = [
-    `Build an executive dashboard for ${profile.filename} with the most important KPIs and supporting charts.`,
-    `Summarize the biggest patterns, concentration, and outliers in ${profile.filename}.`,
-  ];
+const fallbackSuggestedPrompts = (
+  profile: DatasetProfile,
+  analysisMemory?: AnalysisMemory,
+  existingPanels?: DashboardPanel[],
+) => {
+  const prompts: string[] = [];
 
   const rankingOpportunity = pickOpportunity(analysisMemory, "ranking");
   const distributionOpportunity = pickOpportunity(analysisMemory, "distribution");
   const trendOpportunity = pickOpportunity(analysisMemory, "time_trend");
+  const dataQualityOpportunity = pickOpportunity(analysisMemory, "data_quality");
+  const primaryPanelTitle = existingPanels?.[0]?.title;
+
+  if (primaryPanelTitle) {
+    prompts.push(`Explain what the panel titled "${primaryPanelTitle}" says and what a stakeholder should notice first.`);
+  }
 
   if (rankingOpportunity?.dimension && rankingOpportunity.measure) {
     prompts.push(
-      `Compare the top ${rankingOpportunity.dimension} values by ${rankingOpportunity.measure} and explain the biggest drivers.`,
+      `Show the top 5 ${rankingOpportunity.dimension.replace(/_/g, " ")} values by ${rankingOpportunity.measure.replace(/_/g, " ")} and explain what drives the leaders.`,
     );
   } else if (profile.categoricalColumns[0] && profile.numericColumns[0]) {
     prompts.push(
-      `Compare the top ${profile.categoricalColumns[0]} values by ${profile.numericColumns[0]} and explain the biggest drivers.`,
+      `Compare the top ${profile.categoricalColumns[0].replace(/_/g, " ")} values by ${profile.numericColumns[0].replace(/_/g, " ")} and explain the biggest drivers.`,
     );
   }
 
   if (trendOpportunity?.measure && trendOpportunity.dateColumn) {
     prompts.push(
-      `Show the trend of ${trendOpportunity.measure} over ${trendOpportunity.dateColumn} and call out notable shifts.`,
+      `Show the trend of ${trendOpportunity.measure.replace(/_/g, " ")} over ${trendOpportunity.dateColumn.replace(/_/g, " ")} and call out notable shifts.`,
     );
   } else if (profile.datetimeColumns[0] && profile.numericColumns[0]) {
     prompts.push(
-      `Show the trend of ${profile.numericColumns[0]} over ${profile.datetimeColumns[0]} and call out notable shifts.`,
+      `Show the trend of ${profile.numericColumns[0].replace(/_/g, " ")} over ${profile.datetimeColumns[0].replace(/_/g, " ")} and call out notable shifts.`,
     );
   }
 
   if (distributionOpportunity?.measure) {
     prompts.push(
-      `Analyze the distribution of ${distributionOpportunity.measure} and highlight skew, spread, and outliers.`,
+      `Analyze the distribution of ${distributionOpportunity.measure.replace(/_/g, " ")} and highlight skew, spread, and outliers.`,
     );
   }
 
+  if (dataQualityOpportunity) {
+    prompts.push("Show me the columns with the most missing data and explain whether they weaken the current dashboard.");
+  }
+
   prompts.push(
-    `Recommend how to restructure this dashboard for a stakeholder demo and generate the best KPI and chart mix.`,
+    `Restructure this dashboard for a stakeholder demo with the best KPI package and one high-signal supporting view.`,
   );
 
-  return prompts.slice(0, 5);
+  return Array.from(new Set(prompts)).slice(0, 5);
 };
 
 export const generateSuggestedPrompts = async (args: {
   profile: DatasetProfile;
   analysisMemory?: AnalysisMemory;
+  existingPanels?: DashboardPanel[];
   insights?: string[];
 }) => {
-  const fallback = fallbackSuggestedPrompts(args.profile, args.analysisMemory);
+  const fallback = fallbackSuggestedPrompts(args.profile, args.analysisMemory, args.existingPanels);
   const parsed = await callJsonModel<{ suggestedPrompts?: string[] }>(
     env.mistralSummaryModel,
     [
       {
         role: "system",
         content:
-          "You generate concise analytics follow-up prompts. Return strict JSON with a single key `suggestedPrompts`, whose value is an array of 3 to 5 short user-ready prompts. Each prompt should be specific to the dataset context, useful for a dashboard demo, and phrased as something the user can click to run. Prefer prompts that ask for KPI summaries, chart comparisons, anomalies, concentration, trends, or stakeholder-friendly dashboard reshapes.",
+          "You generate concise analytics follow-up prompts. Return strict JSON with a single key `suggestedPrompts`, whose value is an array of 3 to 5 short user-ready prompts. Each prompt should be specific to the dataset context, useful for the current dashboard state, and phrased as something the user can click to run. Prefer prompts that ask for a concrete next step: ranking, trend, distribution, panel explanation, chart conversion, anomaly review, or stakeholder-friendly dashboard reshapes. Avoid generic prompts like 'summarize patterns' unless they mention the actual metric or panel in view.",
       },
       {
         role: "user",
@@ -428,10 +599,33 @@ export const generateSuggestedPrompts = async (args: {
 export const routeAnalysisRequest = async (args: {
   profile: DatasetProfile;
   analysisMemory?: AnalysisMemory;
+  existingPanels?: DashboardPanel[];
   prompt: string;
   contextSummary: string;
 }) => {
-  const fallback = inferHeuristicRoute(args.prompt, args.analysisMemory);
+  const fallback = inferHeuristicRoute(args.prompt, args.analysisMemory, args.existingPanels);
+  const selectedRecommendation = selectRecommendationForPrompt({
+    prompt: args.prompt,
+    memory: args.analysisMemory,
+  });
+
+  const recommendationBiasedFallback = selectedRecommendation
+    ? {
+        ...fallback,
+        confidence: Math.max(fallback.confidence, selectedRecommendation.score),
+        summary: selectedRecommendation.reasons[0] ?? fallback.summary,
+        requestClass:
+          selectedRecommendation.intent === "comparison"
+            ? "dashboard_refresh"
+            : selectedRecommendation.intent === "ranking" && fallback.requestClass === "answer"
+              ? "dashboard_refresh"
+              : fallback.requestClass,
+        scope:
+          selectedRecommendation.requiresSandbox || fallback.requestClass === "panel_replace"
+            ? fallback.scope
+            : "cached_only",
+      }
+    : fallback;
   const parsed = await callJsonModel<{
     requestClass?: AnalysisRoute["requestClass"];
     scope?: AnalysisRoute["scope"];
@@ -453,30 +647,30 @@ export const routeAnalysisRequest = async (args: {
   ]);
 
   if (!parsed) {
-    return fallback;
+    return recommendationBiasedFallback;
   }
 
   return {
     id: makeId("route"),
-    requestClass: parsed.requestClass ?? fallback.requestClass,
-    scope: parsed.scope ?? fallback.scope,
+    requestClass: parsed.requestClass ?? recommendationBiasedFallback.requestClass,
+    scope: parsed.scope ?? recommendationBiasedFallback.scope,
     confidence:
       typeof parsed.confidence === "number"
         ? Math.max(0, Math.min(1, parsed.confidence))
-        : fallback.confidence,
+        : recommendationBiasedFallback.confidence,
     urgency:
       parsed.urgency === "high" || parsed.urgency === "medium" || parsed.urgency === "low"
         ? parsed.urgency
-        : fallback.urgency,
+        : recommendationBiasedFallback.urgency,
     allowedFallbackDepth:
       typeof parsed.allowedFallbackDepth === "number"
         ? Math.max(1, Math.min(7, Math.round(parsed.allowedFallbackDepth)))
-        : fallback.allowedFallbackDepth,
+        : recommendationBiasedFallback.allowedFallbackDepth,
     shouldMutateDashboard:
       typeof parsed.shouldMutateDashboard === "boolean"
         ? parsed.shouldMutateDashboard
-        : fallback.shouldMutateDashboard,
-    summary: parsed.summary?.trim() || fallback.summary,
+        : recommendationBiasedFallback.shouldMutateDashboard,
+    summary: parsed.summary?.trim() || recommendationBiasedFallback.summary,
   } satisfies AnalysisRoute;
 };
 
@@ -484,18 +678,21 @@ export const createTaskSpec = async (args: {
   route: AnalysisRoute;
   profile: DatasetProfile;
   analysisMemory?: AnalysisMemory;
+  existingPanels?: DashboardPanel[];
   prompt: string;
   contextSummary: string;
 }) => {
+  const targetPanel = extractPanelTarget(args.prompt, args.existingPanels);
   const fallback = {
-    ...heuristicTaskSpec(args.route, args.prompt),
+    ...heuristicTaskSpec(args.route, args.prompt, args.analysisMemory),
     composition: inferCompositionPlan(args),
+    targetPanel,
   };
   const parsed = await callJsonModel<Partial<TaskSpec>>(env.mistralRouterModel, [
     {
       role: "system",
       content:
-        "You are the task planning stage of an analytics agent. Return strict JSON shaped like a TaskSpec with keys kind, title, businessQuestion, responseType, executionPath, acceptablePanelKinds, displayConstraints, cacheKey, validationRules, expectedOutputs, composition, and successCriteria. Do not emit final UI payloads. Do not emit Python code. Keep the task bounded and execution-safe. If the route is dashboard_refresh or the prompt asks for both summary metrics and a visual, plan for a dashboard response with concise KPIs plus one supporting panel when possible.",
+        "You are the task planning stage of an analytics agent. Return strict JSON shaped like a TaskSpec with keys kind, title, businessQuestion, responseType, executionPath, acceptablePanelKinds, displayConstraints, cacheKey, validationRules, expectedOutputs, composition, targetPanel, selectedRecommendationId, and successCriteria. Do not emit final UI payloads. Do not emit Python code. Keep the task bounded and execution-safe. If the route is dashboard_refresh or the prompt asks for both summary metrics and a visual, plan for a dashboard response with concise KPIs plus one supporting panel when possible. If the prompt clearly targets an existing panel, preserve that targetPanel in the response.",
     },
     {
       role: "user",
@@ -563,6 +760,17 @@ export const createTaskSpec = async (args: {
       ...fallback.composition,
       ...(parsed.composition && typeof parsed.composition === "object" ? parsed.composition : {}),
     },
+    targetPanel:
+      parsed.targetPanel && typeof parsed.targetPanel === "object"
+        ? {
+            ...fallback.targetPanel,
+            ...parsed.targetPanel,
+          }
+        : fallback.targetPanel,
+    selectedRecommendationId:
+      typeof parsed.selectedRecommendationId === "string"
+        ? parsed.selectedRecommendationId
+        : fallback.selectedRecommendationId,
     successCriteria: Array.isArray(parsed.successCriteria)
       ? parsed.successCriteria.filter((item): item is string => typeof item === "string").slice(0, 6)
       : fallback.successCriteria,
@@ -582,7 +790,7 @@ export const generateAnalysisCode = async (args: {
     {
       role: "system",
       content:
-        "You generate Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. The code must read /home/user/data.csv, may use pandas/numpy/json, and must write the final machine-readable JSON object to /home/user/viewpilot/query-result.json. Stdout is for lightweight human logs only, not the final result. The JSON envelope may contain keys title, narrative, kpis, panels, insights, cache, artifacts. Respect taskSpec.composition: if targetKpis > 0, return a concise KPI package; if targetPanels is 2 and supportPanelAllowed is true, try to return one strong primary panel plus one support panel only when the second panel adds genuine signal. Every value written to JSON must already be JSON serializable: convert pandas Series/Index/ndarray to Python lists, convert numpy scalars to Python scalars, and do not place DataFrame or Series objects directly in the result. Plotly panels must use this exact shape: {\"kind\":\"plotly\",\"title\":string,\"description\":string,\"spec\":{\"data\":Array<Record<string, unknown>>,\"layout\"?:Record<string, unknown>,\"config\"?:Record<string, unknown>}}. Table panels must use {\"kind\":\"table\",\"title\":string,\"description\":string,\"columns\":string[],\"rows\":Array<Record<string, unknown>>}. Keep the task bounded and stakeholder-ready. Never return markdown fences.",
+        "You generate Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. The code must read /home/user/data.csv, may use pandas/numpy/json, and must write the final machine-readable JSON object to /home/user/viewpilot/query-result.json. Stdout is for lightweight human logs only, not the final result. The JSON envelope may contain keys title, narrative, kpis, panels, insights, cache, artifacts. Respect taskSpec.composition: if targetKpis > 0, return a concise KPI package; if targetPanels is 2 and supportPanelAllowed is true, try to return one strong primary panel plus one support panel only when the second panel adds genuine signal. Prefer reusable helpers from /home/user/viewpilot/analyst_helpers.py by appending /home/user/viewpilot to sys.path and importing helper functions instead of hand-rolling every chart. Every value written to JSON must already be JSON serializable: convert pandas Series/Index/ndarray to Python lists, convert numpy scalars to Python scalars, and do not place DataFrame or Series objects directly in the result. Plotly panels must use this exact shape: {\"kind\":\"plotly\",\"title\":string,\"description\":string,\"spec\":{\"data\":Array<Record<string, unknown>>,\"layout\"?:Record<string, unknown>,\"config\"?:Record<string, unknown>}}. Table panels must use {\"kind\":\"table\",\"title\":string,\"description\":string,\"columns\":string[],\"rows\":Array<Record<string, unknown>>}. Keep the task bounded and stakeholder-ready. Never return markdown fences.",
     },
     {
       role: "user",
@@ -618,7 +826,7 @@ export const repairAnalysisCode = async (args: {
     {
       role: "system",
       content:
-        "You repair Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. Fix the failure using the stderr and validation feedback. Keep the code bounded to the original task. The repaired code must write the final machine-readable JSON object to /home/user/viewpilot/query-result.json, and stdout should only contain lightweight human logs. Respect taskSpec.composition when deciding how many KPIs and panels to return. Every JSON value must already be JSON serializable: convert pandas Series/Index/ndarray to Python lists, convert numpy scalars to Python scalars, and never place DataFrame or Series objects directly in the result. Plotly panels must use the exact dashboard schema with kind, title, description, and spec.data/spec.layout/spec.config.",
+        "You repair Python pandas analysis code for an E2B sandbox. Return strict JSON with keys code and expectedArtifacts. Fix the failure using the stderr and validation feedback. Keep the code bounded to the original task. The repaired code must write the final machine-readable JSON object to /home/user/viewpilot/query-result.json, and stdout should only contain lightweight human logs. Respect taskSpec.composition when deciding how many KPIs and panels to return. Prefer reusable helpers from /home/user/viewpilot/analyst_helpers.py by appending /home/user/viewpilot to sys.path and importing helper functions instead of hand-rolling every chart. Every JSON value must already be JSON serializable: convert pandas Series/Index/ndarray to Python lists, convert numpy scalars to Python scalars, and never place DataFrame or Series objects directly in the result. Plotly panels must use the exact dashboard schema with kind, title, description, and spec.data/spec.layout/spec.config.",
     },
     {
       role: "user",

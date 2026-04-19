@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Sandbox } from "@e2b/code-interpreter";
 import { env } from "@/lib/env";
-import type { AnalysisMemory, QueryTraceSummary, SessionAnalysisState } from "@/lib/types";
+import type {
+  AnalysisMemory,
+  PendingClarification,
+  QueryTraceSummary,
+  SessionAnalysisState,
+} from "@/lib/types";
 
 const SANDBOX_DATA_PATH = "/home/user/data.csv";
 const SANDBOX_SCRIPT_DIR = "/home/user/viewpilot";
@@ -12,6 +17,7 @@ const SANDBOX_QUERY_RESULT_PATH = `${SANDBOX_SCRIPT_DIR}/query-result.json`;
 const LOCAL_SCRIPT_DIR = path.join(process.cwd(), "sandbox-scripts");
 
 const scriptPaths = [
+  "sandbox-scripts/analyst_helpers.py",
   "sandbox-scripts/explore.py",
   "sandbox-scripts/export.py",
   "sandbox-scripts/load_source.py",
@@ -117,8 +123,10 @@ export const runPythonAnalysis = async (
 ) => {
   await clearSandboxFile(sandbox, SANDBOX_QUERY_RESULT_PATH);
 
+  const wrappedCode = `${PYTHON_ANALYSIS_PRELUDE}\n\n${code}`;
+
   const startTime = Date.now();
-  const execution = await sandbox.runCode(code, {
+  const execution = await sandbox.runCode(wrappedCode, {
     language: "python",
     timeoutMs: 120_000,
     onStdout: (data) => callbacks?.onStdout?.(getStreamLine(data)),
@@ -142,6 +150,76 @@ export const runPythonAnalysis = async (
     resultFile,
   };
 };
+
+const PYTHON_ANALYSIS_PRELUDE = `
+import json
+
+try:
+    import numpy as _np
+except Exception:
+    _np = None
+
+try:
+    import pandas as _pd
+except Exception:
+    _pd = None
+
+if not getattr(json, "_viewpilot_patched", False):
+    json._viewpilot_original_dump = json.dump
+    json._viewpilot_original_dumps = json.dumps
+
+    def _viewpilot_json_default(value):
+        if _pd is not None:
+            if isinstance(value, _pd.DataFrame):
+                return value.to_dict(orient="records")
+            if isinstance(value, _pd.Series):
+                return value.to_list()
+            if isinstance(value, (_pd.Timestamp, _pd.Timedelta)):
+                return value.isoformat()
+        if _np is not None:
+            if isinstance(value, _np.ndarray):
+                return value.tolist()
+            if isinstance(value, _np.generic):
+                return value.item()
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except Exception:
+                pass
+        if hasattr(value, "isoformat"):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    def _sanitize_json_value(value):
+        if isinstance(value, float):
+            if value != value or value == float("inf") or value == float("-inf"):
+                return None
+            return value
+        if isinstance(value, dict):
+            return {key: _sanitize_json_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_sanitize_json_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [_sanitize_json_value(item) for item in value]
+        return value
+
+    def _patched_json_dump(obj, fp, *args, **kwargs):
+        kwargs.setdefault("default", _viewpilot_json_default)
+        kwargs.setdefault("allow_nan", False)
+        return json._viewpilot_original_dump(_sanitize_json_value(obj), fp, *args, **kwargs)
+
+    def _patched_json_dumps(obj, *args, **kwargs):
+        kwargs.setdefault("default", _viewpilot_json_default)
+        kwargs.setdefault("allow_nan", False)
+        return json._viewpilot_original_dumps(_sanitize_json_value(obj), *args, **kwargs)
+
+    json.dump = _patched_json_dump
+    json.dumps = _patched_json_dumps
+    json._viewpilot_patched = True
+`.trim();
 
 export const loadSessionAnalysisStateFromSandbox = async (
   sandbox: Sandbox,
@@ -267,6 +345,7 @@ const coerceSessionAnalysisState = (value: unknown): SessionAnalysisState | null
         : 0,
     observability,
     lastQueryTraceSummary: coerceTraceSummary(candidate.lastQueryTraceSummary),
+    pendingClarification: coercePendingClarification(candidate.pendingClarification),
   } satisfies SessionAnalysisState;
 };
 
@@ -325,6 +404,41 @@ const coerceTraceSummary = (value: unknown): QueryTraceSummary | undefined => {
   };
 };
 
+const coercePendingClarification = (value: unknown): PendingClarification | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.originalPrompt !== "string" ||
+    typeof candidate.reason !== "string" ||
+    !Array.isArray(candidate.options)
+  ) {
+    return undefined;
+  }
+
+  return {
+    id: candidate.id,
+    traceId: typeof candidate.traceId === "string" ? candidate.traceId : undefined,
+    originalPrompt: candidate.originalPrompt,
+    reason: candidate.reason,
+    recommendedOptionId:
+      typeof candidate.recommendedOptionId === "string" ? candidate.recommendedOptionId : undefined,
+    createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : "",
+    options: candidate.options
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .map((item) => ({
+        id: typeof item.id === "string" ? item.id : "",
+        label: typeof item.label === "string" ? item.label : "",
+        description: typeof item.description === "string" ? item.description : "",
+        resolvedPrompt: typeof item.resolvedPrompt === "string" ? item.resolvedPrompt : "",
+      }))
+      .filter((item) => item.id && item.label),
+  };
+};
+
 const coerceAnalysisMemory = (value: unknown): AnalysisMemory | undefined => {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -349,6 +463,12 @@ const coerceAnalysisMemory = (value: unknown): AnalysisMemory | undefined => {
       : [],
     opportunities: Array.isArray(candidate.opportunities)
       ? (candidate.opportunities as AnalysisMemory["opportunities"])
+      : [],
+    recommendations: Array.isArray(candidate.recommendations)
+      ? (candidate.recommendations as AnalysisMemory["recommendations"])
+      : [],
+    metricHighlights: Array.isArray(candidate.metricHighlights)
+      ? (candidate.metricHighlights as AnalysisMemory["metricHighlights"])
       : [],
   };
 };

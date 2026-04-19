@@ -13,6 +13,30 @@ export const runtime = "nodejs";
 const fallbackAssistant =
   "The core upload-to-dashboard flow is live. Add `MISTRAL_API_KEY` to enable the full question-answering copilot against your dataset.";
 
+const resolveClarificationPrompt = (session: NonNullable<ReturnType<typeof getSessionState>>, prompt: string) => {
+  const pending = session.analysisState.pendingClarification;
+  if (!pending) {
+    return { prompt, pending: undefined as undefined | typeof pending, keepWaiting: false };
+  }
+
+  const normalized = prompt.trim().toUpperCase();
+  const matchedOption = pending.options.find((option) => option.id.toUpperCase() === normalized);
+
+  if (matchedOption?.id === "D") {
+    return { prompt, pending, keepWaiting: true };
+  }
+
+  if (matchedOption?.resolvedPrompt) {
+    return { prompt: matchedOption.resolvedPrompt, pending, keepWaiting: false };
+  }
+
+  return {
+    prompt: `${pending.originalPrompt}\nClarification from user: ${prompt.trim()}`,
+    pending,
+    keepWaiting: false,
+  };
+};
+
 export async function POST(request: Request) {
   const { sessionId, prompt } = (await request.json()) as {
     sessionId?: string;
@@ -38,16 +62,47 @@ export async function POST(request: Request) {
     createdAt: nowIso(),
   };
 
+  const clarification = resolveClarificationPrompt(session, prompt);
+
+  if (clarification.keepWaiting && clarification.pending) {
+    const nextState = upsertSessionState({
+      ...session,
+      messages: [
+        ...session.messages,
+        userMessage,
+        {
+          id: makeId("msg"),
+          role: "assistant",
+          content:
+            "Tell me the exact change you want and I’ll use that to continue. For example: replace the current pie chart with a ranked bar chart using outlay amount.",
+          createdAt: nowIso(),
+        },
+      ],
+    });
+
+    return NextResponse.json(nextState);
+  }
+
   try {
     const workingSession = {
       ...session,
+      analysisState: {
+        ...session.analysisState,
+        pendingClarification: undefined,
+      },
       messages: [...session.messages, userMessage],
     };
 
-    const nextState = await runInvestorWorkflow({
-      session: workingSession,
-      prompt,
-    });
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Query timed out. The sandbox may be under load — try again.")), 55_000),
+    );
+    const nextState = await Promise.race([
+      runInvestorWorkflow({
+        session: workingSession,
+        prompt: clarification.prompt,
+      }),
+      timeoutPromise,
+    ]);
 
     return NextResponse.json(upsertSessionState(nextState));
   } catch (error) {
