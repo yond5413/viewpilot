@@ -1,17 +1,10 @@
 import type { DashboardState, SessionAnalysisState } from "@/lib/types";
+import { getRedisClient } from "@/lib/server/redis";
 import { nowIso } from "@/lib/utils";
 
-type SessionMap = Map<string, DashboardState>;
+const SESSION_TTL_SECONDS = 60 * 60 * 24;
 
-declare global {
-  var __viewpilotSessions__: SessionMap | undefined;
-}
-
-const sessions = globalThis.__viewpilotSessions__ ?? new Map<string, DashboardState>();
-
-if (!globalThis.__viewpilotSessions__) {
-  globalThis.__viewpilotSessions__ = sessions;
-}
+const sessionKey = (sessionId: string) => `session:${sessionId}`;
 
 export const createEmptyAnalysisState = (): SessionAnalysisState => ({
   validatedMetrics: [],
@@ -59,25 +52,39 @@ export const createSessionState = (
   lastUpdatedAt: nowIso(),
 });
 
-export const getSessionState = (sessionId: string) => sessions.get(sessionId);
+export const getSessionState = async (sessionId: string) => {
+  const redis = await getRedisClient();
+  const raw = await redis.get(sessionKey(sessionId));
 
-export const upsertSessionState = (state: DashboardState) => {
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(raw) as DashboardState;
+  } catch {
+    return undefined;
+  }
+};
+
+export const upsertSessionState = async (state: DashboardState) => {
+  const redis = await getRedisClient();
   state.lastUpdatedAt = nowIso();
-  sessions.set(state.sessionId, state);
+  await redis.set(sessionKey(state.sessionId), JSON.stringify(state), {
+    EX: SESSION_TTL_SECONDS,
+  });
   return state;
 };
 
-export const updateSessionState = (
+export const updateSessionState = async (
   sessionId: string,
   updater: (current: DashboardState) => DashboardState,
 ) => {
-  const current = sessions.get(sessionId);
+  const current = await getSessionState(sessionId);
   if (!current) {
     return undefined;
   }
 
   const next = updater(current);
-  next.lastUpdatedAt = nowIso();
-  sessions.set(sessionId, next);
-  return next;
+  return upsertSessionState(next);
 };

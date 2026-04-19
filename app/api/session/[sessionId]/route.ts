@@ -9,7 +9,7 @@ type RouteContext = {
 
 export async function GET(_: Request, context: RouteContext) {
   const { sessionId } = await context.params;
-  const session = getSessionState(sessionId);
+  const session = await getSessionState(sessionId);
 
   if (!session) {
     return NextResponse.json({ error: "Unknown session." }, { status: 404 });

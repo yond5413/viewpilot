@@ -6,6 +6,7 @@ import {
 } from "@/lib/agent-workflow";
 import { summarizeQueryTrace } from "@/lib/query-trace-store";
 import { getSessionState, upsertSessionState } from "@/lib/server/session-store";
+import type { DashboardState } from "@/lib/types";
 import { makeId, nowIso } from "@/lib/utils";
 
 export const runtime = "nodejs";
@@ -13,7 +14,7 @@ export const runtime = "nodejs";
 const fallbackAssistant =
   "The core upload-to-dashboard flow is live. Add `MISTRAL_API_KEY` to enable the full question-answering copilot against your dataset.";
 
-const resolveClarificationPrompt = (session: NonNullable<ReturnType<typeof getSessionState>>, prompt: string) => {
+const resolveClarificationPrompt = (session: DashboardState, prompt: string) => {
   const pending = session.analysisState.pendingClarification;
   if (!pending) {
     return { prompt, pending: undefined as undefined | typeof pending, keepWaiting: false };
@@ -50,7 +51,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const session = getSessionState(sessionId);
+  const session = await getSessionState(sessionId);
   if (!session || !session.profile) {
     return NextResponse.json({ error: "Session is not ready yet." }, { status: 404 });
   }
@@ -65,7 +66,7 @@ export async function POST(request: Request) {
   const clarification = resolveClarificationPrompt(session, prompt);
 
   if (clarification.keepWaiting && clarification.pending) {
-    const nextState = upsertSessionState({
+    const nextState = await upsertSessionState({
       ...session,
       messages: [
         ...session.messages,
@@ -104,7 +105,7 @@ export async function POST(request: Request) {
       timeoutPromise,
     ]);
 
-    return NextResponse.json(upsertSessionState(nextState));
+    return NextResponse.json(await upsertSessionState(nextState));
   } catch (error) {
     const traceSummary =
       error instanceof WorkflowStageError
@@ -114,7 +115,7 @@ export async function POST(request: Request) {
           })
         : undefined;
 
-    const nextState = upsertSessionState({
+    const nextState = await upsertSessionState({
       ...session,
       analysisState: {
         ...session.analysisState,

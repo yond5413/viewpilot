@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export async function POST() {
   const sandbox = await createSandbox();
   const sessionState = createSessionState(sandbox.sandboxId, sandbox.sandboxId);
-  upsertSessionState(sessionState);
+  await upsertSessionState(sessionState);
 
   return NextResponse.json({
     sessionId: sessionState.sessionId,

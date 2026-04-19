@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const session = getSessionState(sessionId);
+  const session = await getSessionState(sessionId);
 
   if (!session) {
     return NextResponse.json({ error: "Unknown session." }, { status: 404 });
@@ -56,7 +56,7 @@ export async function POST(request: Request) {
 
   await writeSessionAnalysisStateToSandbox(sandbox, analysisState);
 
-  const nextState = upsertSessionState({
+  const nextState = await upsertSessionState({
     ...session,
     status: "dashboard_ready",
     filename: file.name,

@@ -3,6 +3,7 @@ const readEnv = (name: string) => process.env[name]?.trim() || "";
 export const env = {
   appName: readEnv("NEXT_PUBLIC_APP_NAME") || "Viewpilot",
   e2bApiKey: readEnv("E2B_API_KEY"),
+  redisUrl: readEnv("REDIS_URL"),
   mistralApiKey: readEnv("MISTRAL_API_KEY"),
   mistralModel: readEnv("MISTRAL_MODEL") || "mistral-small-latest",
   mistralRouterModel:
@@ -28,3 +29,4 @@ export const env = {
 
 export const hasLLM = Boolean(env.mistralApiKey);
 export const hasE2B = Boolean(env.e2bApiKey);
+export const hasRedis = Boolean(env.redisUrl);
